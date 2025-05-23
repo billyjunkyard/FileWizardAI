@@ -59,6 +59,30 @@ interface ExtensionGroup {
             </mat-form-field>
           </div>
 
+          <div class="llm-config-section">
+            <mat-form-field appearance="outline" class="llm-provider-field">
+              <mat-label>LLM Provider</mat-label>
+              <mat-select [(ngModel)]="selectedLLMProvider">
+                <mat-option *ngFor="let provider of llmProviders" [value]="provider.value">
+                  {{provider.viewValue}}
+                </mat-option>
+              </mat-select>
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="ollama-url-field" *ngIf="selectedLLMProvider === 'ollama'">
+              <mat-label>Ollama API Base URL</mat-label>
+              <input matInput [(ngModel)]="ollamaApiBaseUrl" placeholder="e.g., http://localhost:11434/v1">
+            </mat-form-field>
+
+            <mat-form-field appearance="outline" class="custom-prompt-field">
+              <mat-label>Custom Summarization Prompt (Optional)</mat-label>
+              <textarea matInput
+                        [(ngModel)]="customSummarizationPrompt"
+                        rows="3"
+                        placeholder="Enter your custom prompt for summarizing documents. If left empty, a default prompt will be used."></textarea>
+            </mat-form-field>
+          </div>
+
           <div class="extensions-section">
             <div class="extensions-header">
               <h3>File Extensions</h3>
@@ -423,13 +447,18 @@ interface ExtensionGroup {
       margin-bottom: 2rem;
     }
 
-    .root-path-field {
+    .root-path-field, .llm-provider-field, .ollama-url-field, .custom-prompt-field {
       width: 100%;
+      margin-bottom: 1rem; /* Add some spacing between fields */
       color: var(--text-primary);
     }
 
-    .root-path-field input {
+    .root-path-field input, .ollama-url-field input, .custom-prompt-field textarea {
       color: var(--text-primary);
+    }
+    
+    .llm-config-section {
+        margin-bottom: 2rem;
     }
 
     .search-text {
@@ -900,6 +929,10 @@ export class AppComponent {
   isLoading: boolean = false;
   filesExts: string[] = [];
   isDarkTheme = false;
+  selectedLLMProvider: string = 'openai';
+  ollamaApiBaseUrl: string = 'http://localhost:11434/v1';
+  llmProviders = [{value: 'openai', viewValue: 'OpenAI/Groq API'}, {value: 'ollama', viewValue: 'Ollama (Local)'}];
+  customSummarizationPrompt: string = '';
 
   constructor(private dataService: DataService) {
     // Check for saved theme preference
@@ -954,12 +987,19 @@ export class AppComponent {
     this.dstPaths = null;
     this.isLoading = true;
     let params = new HttpParams();
-    params = params.set("root_path", this.rootPath)
-    params = params.set("recursive", this.isRecursive)
-    params = params.set("required_exts", this.filesExts.join(';'))
+    params = params.set("root_path", this.rootPath);
+    params = params.set("recursive", this.isRecursive);
+    params = params.set("required_exts", this.filesExts.join(';'));
+    params = params.set("llm_provider", this.selectedLLMProvider);
+    if (this.selectedLLMProvider === 'ollama') {
+      params = params.set("ollama_api_base_url", this.ollamaApiBaseUrl);
+    }
+    if (this.customSummarizationPrompt && this.customSummarizationPrompt.trim() !== '') {
+      params = params.set("custom_summarization_prompt", this.customSummarizationPrompt);
+    }
     this.dataService.getFormattedFiles(params).subscribe((data) => {
-      this.original_files = data
-      this.original_files.items = this.original_files.items.map((item: any) => ({ src_path: item.src_path.replaceAll("\\\\", "/").replaceAll("\\", "/"), dst_path: item.dst_path }))
+      this.original_files = data;
+      this.original_files.items = this.original_files.items.map((item: any) => ({ src_path: item.src_path.replaceAll("\\\\", "/").replaceAll("\\", "/"), dst_path: item.dst_path }));
       let res = this.original_files.items.map((item: any) => ({ src_path: `${data.root_path}/${item.src_path}`, dst_path: `${data.root_path}/${item.dst_path}` }))
       this.srcPaths = res.map((r: any) => r.src_path);
       this.dstPaths = res.map((r: any) => r.dst_path);
