@@ -304,75 +304,15 @@ def load_documents(path: str, recursive: bool, required_exts: list):
     logger.info(f"Attempting to load documents from {path} with extensions: {required_exts}")
     splitter = TokenTextSplitter(chunk_size=2048, chunk_overlap=200) 
     processed_files_data = [] 
-
-    pdf_exts = [ext for ext in required_exts if ext.lower() == '.pdf']
-    other_exts = [ext for ext in required_exts if ext.lower() != '.pdf']
-
     INITIAL_SUMMARY_CHAR_LIMIT = 8000 
 
-    if pdf_exts:
-        from llama_index.core.readers import PDFReader 
-        
-        file_pattern = "**/*.pdf" if recursive else "*.pdf"
-        pdf_files = list(Path(path).glob(file_pattern))
-        
-        logger.info(f"Found {len(pdf_files)} PDF files to process with PDFReader.")
-
-        for pdf_file_path_obj in pdf_files:
-            file_path_str = str(pdf_file_path_obj)
-            logger.info(f"Processing PDF file: {file_path_str}")
-            full_text = ""
-            current_metadata = {"file_path": file_path_str} 
-
-            try:
-                pdf_reader = PDFReader()
-                pdf_docs_list = pdf_reader.load_data(file=pdf_file_path_obj)
-                
-                if not pdf_docs_list:
-                    logger.warning(f"PDFReader returned no documents for {file_path_str}")
-                    processed_files_data.append({
-                        "file_path": file_path_str, "full_text": "", "text_chunks": [],
-                        "initial_summary_text": "", "metadata": current_metadata
-                    })
-                    continue
-
-                page_texts = []
-                for i, loaded_doc in enumerate(pdf_docs_list):
-                    if loaded_doc.text and loaded_doc.text.strip():
-                        page_texts.append(loaded_doc.text)
-                    if i == 0 and loaded_doc.metadata: 
-                        current_metadata.update({k: v for k, v in loaded_doc.metadata.items() if k != 'file_path'})
-
-                full_text = "\n".join(page_texts)
-                text_chunks = splitter.split_text(full_text) if full_text.strip() else []
-                if not full_text.strip():
-                     logger.warning(f"PDF file {file_path_str} resulted in no text content after concatenation.")
-                elif not text_chunks and full_text.strip(): 
-                    logger.error(f"Splitting text for PDF file {file_path_str} resulted in no chunks, using full text as one chunk.")
-                    text_chunks = [full_text]
-
-
-                initial_summary_text = full_text[:INITIAL_SUMMARY_CHAR_LIMIT]
-                
-                processed_files_data.append({
-                    "file_path": file_path_str, "full_text": full_text, "text_chunks": text_chunks,
-                    "initial_summary_text": initial_summary_text, "metadata": current_metadata
-                })
-                logger.debug(f"Successfully processed PDF: {file_path_str}, {len(text_chunks)} chunks created.")
-
-            except Exception as e:
-                logger.error(f"Error reading or processing PDF file {file_path_str}: {e}", exc_info=True)
-                processed_files_data.append({
-                    "file_path": file_path_str, "full_text": "", "text_chunks": [],
-                    "initial_summary_text": "", "metadata": {"file_path": file_path_str, "error": str(e)}
-                })
-
-    if other_exts:
-        logger.info(f"Processing other file types {other_exts} with SimpleDirectoryReader.")
+    if required_exts: # Modified: Check if there are any extensions to process
+        logger.info(f"Processing file types {required_exts} with SimpleDirectoryReader.")
         aggregated_file_contents = {}
         try:
+            # Modified: SimpleDirectoryReader now handles all required_exts
             reader = SimpleDirectoryReader(
-                input_dir=path, recursive=recursive, required_exts=other_exts, errors='warn' 
+                input_dir=path, recursive=recursive, required_exts=required_exts, errors='warn' 
             )
             for doc_chunk_list in reader.iter_data(): 
                 for doc_obj in doc_chunk_list: 
@@ -394,10 +334,9 @@ def load_documents(path: str, recursive: bool, required_exts: list):
                 text_chunks = splitter.split_text(full_text) if full_text.strip() else []
                 if not full_text.strip():
                     logger.warning(f"File {file_path_str} has no text content after aggregation.")
-                elif not text_chunks and full_text.strip():
-                    logger.error(f"Splitting text for file {file_path_str} resulted in no chunks, using full text as one chunk.")
+                elif not text_chunks and full_text.strip(): # If there's text but no chunks, use full text as a chunk
+                    logger.warning(f"Splitting text for file {file_path_str} resulted in no chunks, using full text as one chunk.")
                     text_chunks = [full_text]
-
 
                 initial_summary_text = full_text[:INITIAL_SUMMARY_CHAR_LIMIT]
                 processed_files_data.append({
@@ -406,12 +345,14 @@ def load_documents(path: str, recursive: bool, required_exts: list):
                 })
                 logger.debug(f"Successfully processed file: {file_path_str}, {len(text_chunks)} chunks created.")
         except Exception as e:
-            logger.error(f"Error during SimpleDirectoryReader processing for path {path} with extensions {other_exts}: {e}", exc_info=True)
-
-    if not pdf_exts and not other_exts and required_exts:
-        logger.warning(f"Required extensions {required_exts} were specified, but resulted in no files to process.")
-    elif not processed_files_data: 
+            # Modified: Generalized error message
+            logger.error(f"Error during SimpleDirectoryReader processing for path {path} with extensions {required_exts}: {e}", exc_info=True)
+    
+    # Modified: Simplified warning condition
+    if not processed_files_data and required_exts: 
         logger.warning(f"No documents were loaded from {path} with extensions {required_exts}. Check path and file types.")
+    elif not required_exts:
+        logger.warning(f"No required extensions specified for path {path}. No files processed.")
     return processed_files_data
 
 
