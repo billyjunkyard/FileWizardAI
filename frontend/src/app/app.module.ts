@@ -18,6 +18,7 @@ import { MatInputModule } from "@angular/material/input";
 import { MatToolbarModule } from "@angular/material/toolbar";
 import {MatProgressSpinnerModule} from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatDividerModule } from '@angular/material/divider';
 
 @NgModule({
   declarations: [
@@ -27,7 +28,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
   ],
   imports: [BrowserModule, BrowserAnimationsModule, MatTreeModule, MatIconModule, MatButtonModule, HttpClientModule,
     MatCheckboxModule, FormsModule, MatSelectModule, ReactiveFormsModule, MatFormFieldModule,
-    MatSelectModule, FormsModule, ReactiveFormsModule, MatCardModule, MatInputModule, MatToolbarModule, MatProgressSpinnerModule, MatTooltipModule],
+    MatSelectModule, FormsModule, ReactiveFormsModule, MatCardModule, MatInputModule, MatToolbarModule, MatProgressSpinnerModule, MatTooltipModule, MatDividerModule],
   providers: [],
   bootstrap: [AppComponent]
 })
