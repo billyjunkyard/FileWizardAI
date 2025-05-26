@@ -10,7 +10,11 @@ import hashlib
 from .database import SQLiteDB
 from .settings import CustomFormatter
 from .settings import Model
+from .embedding_service import embedding_service # Added
+from .vector_store_service import vector_store_service # Added
 import shutil
+import sqlite3 # Added
+import json # Added
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -23,264 +27,482 @@ from asyncio import Queue
 db = SQLiteDB()
 
 
-async def summarize_document(doc: Document, model: Model, custom_prompt: str | None = None, progress_queue: Queue | None = None):
+async def summarize_document(
+    doc: Document, 
+    file_info_item: dict, # Contains full_text, text_chunks, etc.
+    model: Model, 
+    custom_prompt: str | None = None, 
+    progress_queue: Queue | None = None,
+    research_topic_prompt: str | None = None,
+    quick_topic_analysis_enabled: bool = False,
+    full_doc_topic_analysis_enabled: bool = False
+):
     file_path = doc.metadata.get('file_path', 'Unknown file')
-    logger.info(f"Processing file {file_path} for summarization.")
+    logger.info(f"Processing file {file_path} for summarization and analysis.")
     if progress_queue:
         progress_queue.put_nowait({"type": "file_processing_start", "file": file_path, "stage": "summarization_db_check"})
 
     doc_hash = get_file_hash(file_path) # Assuming get_file_hash is synchronous
-    if db.is_file_exist(file_path, doc_hash):
-        summary = db.get_file_summary(file_path)
+    summary_text = None
+    analysis_data_from_db = None
+    
+    # Result dictionary to hold all data for this file
+    result_data = {
+        "file_path": file_path,
+        "summary": None,
+        "research_topic": None,
+        "is_topic_relevant": None,
+        "sub_topics": None,
+        "topic_connections": None,
+        "analysis_type": None,
+        "file_analysis_hash": None
+    }
+
+    # 1. Basic Summarization (from initial_summary_text, which is doc.text)
+    if db.is_file_exist(file_path, doc_hash): # Checks if file_hash matches
+        summary_text = db.get_file_summary(file_path)
+        logger.info(f"Summary for {file_path} (hash: {doc_hash}) found in DB.")
         if progress_queue:
             progress_queue.put_nowait({"type": "file_processing_update", "file": file_path, "status": "summary_from_db"})
     else:
+        logger.info(f"No existing summary or hash mismatch for {file_path}. Generating new summary.")
         if progress_queue:
-            # Pass file_path for logging within the API call if possible
             progress_queue.put_nowait({"type": "file_processing_update", "file": file_path, "status": "llm_summarization_start"})
-        summary = await model.summarize_document_api(doc.text, custom_prompt=custom_prompt, progress_queue=progress_queue, file_path_for_logging=file_path)
-        db.insert_file_summary(file_path, doc_hash, summary)
+        
+        summary_text = await model.summarize_document_api(
+            doc.text, # doc.text is initial_summary_text
+            custom_prompt=custom_prompt, 
+            progress_queue=progress_queue, 
+            file_path_for_logging=file_path
+        )
+        # Store initial summary
+        db.insert_file_summary(file_path, doc_hash, summary_text) 
         if progress_queue:
             progress_queue.put_nowait({"type": "file_processing_update", "file": file_path, "status": "llm_summarization_complete"})
     
+    result_data["summary"] = summary_text
+
+    # 2. Topic Analysis
+    if research_topic_prompt and (quick_topic_analysis_enabled or full_doc_topic_analysis_enabled):
+        logger.info(f"Proceeding with topic analysis for {file_path}. Topic: '{research_topic_prompt[:50]}...'")
+        analysis_type_str = ""
+        text_for_topic_analysis = ""
+        
+        if quick_topic_analysis_enabled:
+            analysis_type_str = "summary"
+            text_for_topic_analysis = summary_text if summary_text else "" # Use the generated summary
+            logger.info(f"Using summary text for 'quick' topic analysis of {file_path}.")
+        elif full_doc_topic_analysis_enabled:
+            analysis_type_str = "full_doc"
+            text_for_topic_analysis = file_info_item.get('full_text', '')
+            logger.info(f"Using full document text for 'in-depth' topic analysis of {file_path}.")
+
+        if analysis_type_str and text_for_topic_analysis.strip():
+            if progress_queue:
+                progress_queue.put_nowait({"type": "file_processing_update", "file": file_path, "status": f"topic_analysis_start_{analysis_type_str}"})
+
+            current_file_analysis_hash = hashlib.sha256(
+                (doc_hash + research_topic_prompt + analysis_type_str).encode()
+            ).hexdigest()
+
+            # Check DB for existing, up-to-date analysis
+            analysis_data_from_db = db.get_file_analysis_data(file_path, current_file_analysis_hash)
+
+            if analysis_data_from_db:
+                logger.info(f"Up-to-date '{analysis_type_str}' analysis for {file_path} found in DB.")
+                result_data.update(analysis_data_from_db)
+                if progress_queue:
+                    progress_queue.put_nowait({"type": "file_processing_update", "file": file_path, "status": f"topic_analysis_from_db_{analysis_type_str}"})
+            else:
+                logger.info(f"No up-to-date '{analysis_type_str}' analysis for {file_path}. Calling LLM.")
+                if progress_queue:
+                    progress_queue.put_nowait({"type": "file_processing_update", "file": file_path, "status": f"llm_topic_analysis_start_{analysis_type_str}"})
+
+                analysis_results_llm = await model.analyze_text_for_topic_api(
+                    text_content=text_for_topic_analysis,
+                    research_topic=research_topic_prompt,
+                    analysis_type=analysis_type_str,
+                    progress_queue=progress_queue,
+                    file_path_for_logging=file_path
+                )
+
+                if analysis_results_llm:
+                    logger.info(f"LLM analysis successful for {file_path} ({analysis_type_str}).")
+                    analysis_data_to_store = {
+                        "research_topic": research_topic_prompt,
+                        "is_topic_relevant": analysis_results_llm.get("is_relevant"),
+                        "sub_topics": analysis_results_llm.get("sub_topics"),
+                        "topic_connections": analysis_results_llm.get("connections"),
+                        "analysis_llm_prompt": research_topic_prompt, # Storing the user's raw topic
+                        "analysis_type": analysis_type_str,
+                        "file_analysis_hash": current_file_analysis_hash
+                    }
+                    # Update DB with new analysis data AND existing summary
+                    db.insert_file_summary(file_path, doc_hash, summary_text, **analysis_data_to_store)
+                    result_data.update(analysis_data_to_store)
+                    if progress_queue:
+                        progress_queue.put_nowait({"type": "file_processing_update", "file": file_path, "status": f"llm_topic_analysis_complete_{analysis_type_str}"})
+                else:
+                    logger.warning(f"LLM analysis returned no results for {file_path} ({analysis_type_str}).")
+                    if progress_queue:
+                        progress_queue.put_nowait({"type": "file_processing_update", "file": file_path, "status": f"llm_topic_analysis_failed_{analysis_type_str}"})
+        else:
+            logger.info(f"Skipping topic analysis for {file_path} due to missing analysis type or text.")
+    else:
+        logger.info(f"Topic analysis not enabled or no research topic provided for {file_path}.")
+        # If analysis was previously stored but now disabled, ensure we load it if file_hash matches
+        # This ensures the UI can still see old analysis if the file itself hasn't changed.
+        # However, current db.is_file_exist only checks file_hash for summary.
+        # To load old analysis, we'd need to fetch the full record.
+        # For now, if analysis is not run, it won't be in result_data unless summary fetch also got it.
+        # This requires get_file_summary to return all fields or a new method.
+        # Let's assume for now: if analysis is not run, old analysis fields remain from previous runs if summary was loaded.
+        # This is implicitly handled if `db.is_file_exist` also implies analysis data is current.
+        # The current `db.is_file_exist` only checks file_hash (implicitly for summary).
+        # Let's refine: if summary is from DB, also try to load existing analysis fields.
+        if summary_text and db.is_file_exist(file_path, doc_hash): # Summary was from DB
+             # Attempt to load any existing analysis data if the file content itself hasn't changed.
+             # This is tricky because we don't know the *previous* analysis_llm_prompt or analysis_type
+             # without storing them or making assumptions.
+             # For simplicity: The current logic of get_file_analysis_data with a specific hash is better.
+             # If analysis is not run in *this* session, the analysis fields in result_data will be None
+             # unless specifically loaded. The UI would then show no current analysis.
+             pass # Current logic is: if analysis is not run, it's not actively loaded unless hash matches.
+
     if progress_queue:
-        progress_queue.put_nowait({"type": "file_processing_end", "file": file_path, "stage": "summarization"})
-    return {
-        "file_path": file_path, # Ensure this key matches what the frontend/server expects
-        "summary": summary
-    }
+        progress_queue.put_nowait({"type": "file_processing_end", "file": file_path, "stage": "summarization_and_analysis"})
+    
+    return result_data
 
 
-async def summarize_image_document(doc: ImageDocument, model: Model, progress_queue: Queue | None = None):
+async def summarize_image_document(
+    doc: ImageDocument, 
+    model: Model, 
+    progress_queue: Queue | None = None,
+    research_topic_prompt: str | None = None, # Added for signature consistency
+    quick_topic_analysis_enabled: bool = False, # Added
+    full_doc_topic_analysis_enabled: bool = False # Added
+):
     image_path = doc.image_path
     logger.info(f"Processing image {image_path} for summarization.")
+    # Topic analysis for images is not implemented in this phase.
+    # Logging the received analysis parameters if they were passed.
+    if research_topic_prompt:
+        logger.debug(f"Image summarization for {image_path} received research_topic_prompt: '{research_topic_prompt[:30]}...' "
+                     f"Q:{quick_topic_analysis_enabled} F:{full_doc_topic_analysis_enabled} (analysis not applied to images).")
+
     if progress_queue:
         progress_queue.put_nowait({"type": "file_processing_start", "file": image_path, "stage": "image_summarization_db_check"})
 
     image_hash = get_file_hash(image_path)
+    summary_text = None
+    
+    result_data = {"file_path": image_path, "summary": None} # Other analysis fields default to None for images
+
     if db.is_file_exist(image_path, image_hash):
-        summary = db.get_file_summary(image_path)
+        summary_text = db.get_file_summary(image_path)
         if progress_queue:
             progress_queue.put_nowait({"type": "file_processing_update", "file": image_path, "status": "image_summary_from_db"})
     else:
         if progress_queue:
             progress_queue.put_nowait({"type": "file_processing_update", "file": image_path, "status": "llm_image_summarization_start"})
-        summary = await model.summarize_image_api(image_path=image_path, progress_queue=progress_queue)
-        db.insert_file_summary(image_path, image_hash, summary)
+        summary_text = await model.summarize_image_api(image_path=image_path, progress_queue=progress_queue)
+        # For images, analysis fields are not populated from model.analyze_text_for_topic_api
+        # So, we only store the basic summary.
+        db.insert_file_summary(image_path, image_hash, summary_text) 
         if progress_queue:
             progress_queue.put_nowait({"type": "file_processing_update", "file": image_path, "status": "llm_image_summarization_complete"})
 
+    result_data["summary"] = summary_text
     if progress_queue:
         progress_queue.put_nowait({"type": "file_processing_end", "file": image_path, "stage": "image_summarization"})
-    return {
-        "file_path": image_path, # Ensure this key matches
-        "summary": summary
-    }
+    return result_data
 
 
-async def dispatch_summarize_document(doc, model: Model, custom_prompt: str | None = None, progress_queue: Queue | None = None):
+async def dispatch_summarize_document(
+    doc_for_summary: Document, # This is the Document object for initial summary
+    file_info_item: dict,      # This is the full dict from load_documents
+    model: Model, 
+    custom_prompt: str | None = None, 
+    progress_queue: Queue | None = None,
+    research_topic_prompt: str | None = None,
+    quick_topic_analysis_enabled: bool = False,
+    full_doc_topic_analysis_enabled: bool = False
+):
     # Check for cancellation before processing each document
-    if progress_queue and hasattr(progress_queue, '_cancelled_event') and progress_queue._cancelled_event.is_set(): # Crude check
-         logger.info(f"Summarization dispatch cancelled for doc: {doc.metadata.get('file_path', 'N/A')}")
+    # Using file_path from file_info_item as it's more reliable source of full path
+    file_path_for_log_dispatch = file_info_item.get('file_path', 'N/A')
+    if progress_queue and hasattr(progress_queue, '_cancelled_event') and progress_queue._cancelled_event.is_set():
+         logger.info(f"Summarization dispatch cancelled for doc: {file_path_for_log_dispatch}")
          raise asyncio.CancelledError("Summarization dispatch cancelled by client request.")
 
-    if isinstance(doc, ImageDocument):
-        return await summarize_image_document(doc, model, progress_queue=progress_queue)
-    elif isinstance(doc, Document):
-        return await summarize_document(doc, model=model, custom_prompt=custom_prompt, progress_queue=progress_queue)
+    if isinstance(doc_for_summary, ImageDocument):
+        # ImageDocument currently doesn't use file_info_item structure in the same way.
+        # For now, it continues to operate mostly on its own image_path.
+        return await summarize_image_document(
+            doc_for_summary, model, progress_queue=progress_queue,
+            research_topic_prompt=research_topic_prompt, # Pass along
+            quick_topic_analysis_enabled=quick_topic_analysis_enabled, # Pass along
+            full_doc_topic_analysis_enabled=full_doc_topic_analysis_enabled # Pass along
+        )
+    elif isinstance(doc_for_summary, Document): # Text document
+        return await summarize_document(
+            doc_for_summary, file_info_item, model=model, 
+            custom_prompt=custom_prompt, progress_queue=progress_queue,
+            research_topic_prompt=research_topic_prompt,
+            quick_topic_analysis_enabled=quick_topic_analysis_enabled,
+            full_doc_topic_analysis_enabled=full_doc_topic_analysis_enabled
+        )
     else:
-        # This case should ideally not be reached if load_documents filters correctly
-        logger.warning(f"Unsupported document type encountered in dispatch: {type(doc)}")
-        return None # Or raise error
+        logger.warning(f"Unsupported document type encountered in dispatch: {type(doc_for_summary)} for {file_path_for_log_dispatch}")
+        return None
 
 
-async def get_summaries(documents, model: Model, custom_prompt: str | None = None, progress_queue: Queue | None = None):
-    docs_summaries = []
-    total_docs = len(documents)
+async def get_summaries(
+    docs_and_file_info_list: list[tuple[Document, dict]], # List of (doc_for_summary, file_info_item)
+    model: Model, 
+    custom_prompt: str | None = None, 
+    progress_queue: Queue | None = None,
+    research_topic_prompt: str | None = None,
+    quick_topic_analysis_enabled: bool = False,
+    full_doc_topic_analysis_enabled: bool = False
+):
+    docs_summaries_and_analysis = [] # Will store results from summarize_document
+    total_items = len(docs_and_file_info_list)
     if progress_queue:
-        progress_queue.put_nowait({"type": "status", "message": f"Starting summarization of {total_docs} documents."})
+        progress_queue.put_nowait({"type": "status", "message": f"Starting summarization and analysis of {total_items} documents."})
 
-    for i, doc in enumerate(documents):
-        # Check for cancellation before processing each document
-        # A more robust way to check for cancellation might be needed if the queue doesn't expose such an event.
-        # For now, we rely on exceptions bubbling up or checks within dispatch_summarize_document.
-        # Consider if server.py's task cancellation is sufficient.
-
-        file_path_for_log = doc.metadata.get('file_path', doc.image_path if isinstance(doc, ImageDocument) else 'Unknown file')
+    for i, (doc_for_summary, file_info_item) in enumerate(docs_and_file_info_list):
+        file_path_for_log = file_info_item.get('file_path', doc_for_summary.metadata.get('file_path', 'Unknown file'))
+        
         if progress_queue:
             progress_queue.put_nowait({
                 "type": "progress_update", 
                 "current_doc_index": i + 1, 
-                "total_docs": total_docs,
+                "total_docs": total_items, # Corrected key
                 "file": file_path_for_log, 
-                "status": "summarization_dispatch_started" # More specific status
+                "status": "processing_dispatch_started" 
             })
         
-        summary_data = await dispatch_summarize_document(doc, model=model, custom_prompt=custom_prompt, progress_queue=progress_queue)
-        if summary_data: # Ensure summary_data is not None (e.g. if dispatch_summarize_document returns None for unsupported types)
-            docs_summaries.append(summary_data)
+        processed_data = await dispatch_summarize_document(
+            doc_for_summary, file_info_item, model=model, 
+            custom_prompt=custom_prompt, progress_queue=progress_queue,
+            research_topic_prompt=research_topic_prompt,
+            quick_topic_analysis_enabled=quick_topic_analysis_enabled,
+            full_doc_topic_analysis_enabled=full_doc_topic_analysis_enabled
+        )
+        if processed_data: 
+            docs_summaries_and_analysis.append(processed_data)
 
         if progress_queue:
             progress_queue.put_nowait({
                 "type": "progress_update", 
                 "current_doc_index": i + 1,
-                "total_docs": total_docs,
+                "total_docs": total_items, # Corrected key
                 "file": file_path_for_log, 
-                "status": "summarization_dispatch_completed" # More specific status
+                "status": "processing_dispatch_completed"
             })
-    return docs_summaries
+    return docs_summaries_and_analysis
 
 
 async def remove_deleted_files():
     file_paths = db.get_all_files()
     deleted_file_paths = [file_path for file_path in file_paths if not os.path.exists(file_path)]
     db.delete_records(deleted_file_paths)
+    # Also delete from ChromaDB
+    if deleted_file_paths:
+        logger.info(f"Attempting to delete chunks from vector store for {len(deleted_file_paths)} deleted files.")
+        deleted_from_chroma_count = 0
+        for file_path in deleted_file_paths:
+            try:
+                # Note: vector_store_service.delete_chunks_for_file expects absolute paths if that's how they are stored.
+                # Assuming file_paths from db.get_all_files() are absolute or consistent with ChromaDB storage.
+                # If they are relative, ensure consistency or convert to absolute.
+                # For now, assuming 'file_path' is the key used in ChromaDB.
+                if vector_store_service.delete_chunks_for_file(file_path):
+                    logger.debug(f"Successfully deleted chunks for {file_path} from vector store.")
+                    deleted_from_chroma_count +=1
+                else:
+                    # This might mean the file wasn't in Chroma or deletion failed.
+                    logger.warning(f"Failed to delete chunks for {file_path} from vector store or file not found there.")
+            except Exception as e_chroma_del:
+                logger.error(f"Error deleting chunks from vector store for {file_path}: {e_chroma_del}", exc_info=True)
+        logger.info(f"Completed deletion from vector store. Successfully deleted chunks for {deleted_from_chroma_count}/{len(deleted_file_paths)} files.")
 
 
 def load_documents(path: str, recursive: bool, required_exts: list):
     logger.info(f"Attempting to load documents from {path} with extensions: {required_exts}")
-    splitter = TokenTextSplitter(chunk_size=6144)
-    documents = []
+    #chunk_size here is for the main text_chunks, not necessarily the initial_summary_text limit.
+    #The initial_summary_text will be a character slice of full_text.
+    splitter = TokenTextSplitter(chunk_size=2048, chunk_overlap=200) # Adjusted chunk_size for general purpose chunks
+    processed_files_data = [] # New list to store dictionaries
 
     # Separate PDF extensions
     pdf_exts = [ext for ext in required_exts if ext.lower() == '.pdf']
     other_exts = [ext for ext in required_exts if ext.lower() != '.pdf']
 
+    # Define a character limit for initial_summary_text
+    INITIAL_SUMMARY_CHAR_LIMIT = 8000 # This is used in load_documents
+
     if pdf_exts:
-        from llama_index.core.readers import PDFReader  # Assuming this is the correct import
+        from llama_index.core.readers import PDFReader # Keep this import local to reduce initial load if not used
         
         file_pattern = "**/*.pdf" if recursive else "*.pdf"
-        # Using Path.glob to find PDF files
         pdf_files = list(Path(path).glob(file_pattern))
         
         logger.info(f"Found {len(pdf_files)} PDF files to process with PDFReader.")
 
-        for pdf_file_path in pdf_files:
-            file_path_str = str(pdf_file_path)
-            logger.info(f"Processing PDF file: {file_path_str} with dedicated PDFReader")
+        for pdf_file_path_obj in pdf_files:
+            file_path_str = str(pdf_file_path_obj)
+            logger.info(f"Processing PDF file: {file_path_str}")
+            full_text = ""
+            current_metadata = {"file_path": file_path_str} 
+
             try:
                 pdf_reader = PDFReader()
-                # load_data expects a Path object for the file argument
-                pdf_docs_list = pdf_reader.load_data(file=pdf_file_path)
+                pdf_docs_list = pdf_reader.load_data(file=pdf_file_path_obj)
                 
                 if not pdf_docs_list:
                     logger.warning(f"PDFReader returned no documents for {file_path_str}")
+                    processed_files_data.append({
+                        "file_path": file_path_str, "full_text": "", "text_chunks": [],
+                        "initial_summary_text": "", "metadata": current_metadata
+                    })
                     continue
 
-                # Process each document loaded from the PDF
-                for loaded_doc in pdf_docs_list:
-                    if not loaded_doc.text or not loaded_doc.text.strip():
-                        logger.warning(f"PDF page/document in {file_path_str} has no text content.")
-                        # Add document with empty text if metadata is needed, or skip
-                        documents.append(Document(text="", metadata={"file_path": file_path_str, "source_empty": True}))
-                        continue
-                    
-                    try:
-                        # Assuming PDFReader provides metadata similar to SimpleDirectoryReader,
-                        # or we might need to construct it.
-                        # For now, let's ensure file_path is in metadata.
-                        current_metadata = loaded_doc.metadata or {}
-                        if 'file_path' not in current_metadata:
-                           current_metadata['file_path'] = file_path_str
-                        
-                        # Split text if necessary (PDFReader might return one doc per page or whole doc)
-                        split_texts = splitter.split_text(loaded_doc.text)
-                        for text_chunk in split_texts:
-                            documents.append(Document(text=text_chunk, metadata=current_metadata))
-                        logger.debug(f"Successfully processed and split PDF: {file_path_str}")
-                    except Exception as e_split:
-                        logger.error(f"Error splitting text for PDF file {file_path_str}: {e_split}")
+                page_texts = []
+                for i, loaded_doc in enumerate(pdf_docs_list):
+                    if loaded_doc.text and loaded_doc.text.strip():
+                        page_texts.append(loaded_doc.text)
+                    if i == 0 and loaded_doc.metadata: 
+                        current_metadata.update({k: v for k, v in loaded_doc.metadata.items() if k != 'file_path'})
+
+                full_text = "\n".join(page_texts)
+                text_chunks = splitter.split_text(full_text) if full_text.strip() else []
+                if not full_text.strip():
+                     logger.warning(f"PDF file {file_path_str} resulted in no text content after concatenation.")
+                elif not text_chunks and full_text.strip(): # If splitting failed but text exists
+                    logger.error(f"Splitting text for PDF file {file_path_str} resulted in no chunks, using full text as one chunk.")
+                    text_chunks = [full_text]
+
+
+                initial_summary_text = full_text[:INITIAL_SUMMARY_CHAR_LIMIT]
+                
+                processed_files_data.append({
+                    "file_path": file_path_str, "full_text": full_text, "text_chunks": text_chunks,
+                    "initial_summary_text": initial_summary_text, "metadata": current_metadata
+                })
+                logger.debug(f"Successfully processed PDF: {file_path_str}, {len(text_chunks)} chunks created.")
 
             except Exception as e:
-                logger.error(f"Error reading PDF file {file_path_str} with dedicated PDFReader: {e}")
+                logger.error(f"Error reading or processing PDF file {file_path_str}: {e}", exc_info=True)
+                processed_files_data.append({
+                    "file_path": file_path_str, "full_text": "", "text_chunks": [],
+                    "initial_summary_text": "", "metadata": {"file_path": file_path_str, "error": str(e)}
+                })
 
     if other_exts:
         logger.info(f"Processing other file types {other_exts} with SimpleDirectoryReader.")
-        reader = SimpleDirectoryReader(
-            input_dir=path,
-            recursive=recursive,
-            required_exts=other_exts,
-            errors='warn'  # Changed from 'ignore' to 'warn'
-        )
+        aggregated_file_contents = {}
         try:
-            for docs_chunk in reader.iter_data():
-                if not docs_chunk or not docs_chunk[0].metadata or 'file_path' not in docs_chunk[0].metadata:
-                    logger.warning(f"Skipping a document chunk due to missing data or metadata in {path}.")
-                    continue
-
-                file_path_for_log = docs_chunk[0].metadata['file_path']
-                logger.info(f"Processing file: {file_path_for_log} with SimpleDirectoryReader")
-
-                # By default, llama index split files into multiple "documents" (docs_chunk)
-                if len(docs_chunk) > 1:
-                    try:
-                        # Join all document contexts, then truncate by token count
-                        full_text = "\n".join([d.text for d in docs_chunk if d.text])
-                        if not full_text.strip():
-                            logger.warning(f"File {file_path_for_log} has no text content after joining chunks.")
-                            documents.append(Document(text="", metadata=docs_chunk[0].metadata))
-                            continue
-                        
-                        text_chunks = splitter.split_text(full_text)
-                        for chunk in text_chunks:
-                            documents.append(Document(text=chunk, metadata=docs_chunk[0].metadata))
-                    except Exception as e:
-                        logger.error(f"Error splitting text for file {file_path_for_log}: {e}")
-                elif docs_chunk: # Single document in the chunk
-                    if not docs_chunk[0].text or not docs_chunk[0].text.strip():
-                        logger.warning(f"File {file_path_for_log} has no text content.")
-                        documents.append(Document(text="", metadata=docs_chunk[0].metadata))
+            reader = SimpleDirectoryReader(
+                input_dir=path, recursive=recursive, required_exts=other_exts, errors='warn' 
+            )
+            for doc_chunk_list in reader.iter_data(): 
+                for doc_obj in doc_chunk_list: 
+                    file_path_for_log = doc_obj.metadata.get('file_path', 'Unknown_file')
+                    if file_path_for_log == 'Unknown_file':
+                        logger.warning(f"Document object missing 'file_path' in metadata. Skipping.")
                         continue
-                    try:
-                        text_chunks = splitter.split_text(docs_chunk[0].text)
-                        for chunk in text_chunks:
-                             documents.append(Document(text=chunk, metadata=docs_chunk[0].metadata))
-                    except Exception as e:
-                        logger.error(f"Error splitting text for single-doc file {file_path_for_log}: {e}")
-                else:
-                    logger.warning(f"Empty document chunk encountered for path {path} with extensions {other_exts}")
+                    if file_path_for_log not in aggregated_file_contents:
+                        aggregated_file_contents[file_path_for_log] = {
+                            "texts": [], "metadata": doc_obj.metadata
+                        }
+                    if doc_obj.text and doc_obj.text.strip():
+                        aggregated_file_contents[file_path_for_log]["texts"].append(doc_obj.text)
+
+            for file_path_str, content_data in aggregated_file_contents.items():
+                logger.info(f"Processing aggregated content for file: {file_path_str}")
+                full_text = "\n".join(content_data["texts"])
+                current_metadata = content_data["metadata"] 
+                text_chunks = splitter.split_text(full_text) if full_text.strip() else []
+                if not full_text.strip():
+                    logger.warning(f"File {file_path_str} has no text content after aggregation.")
+                elif not text_chunks and full_text.strip():
+                    logger.error(f"Splitting text for file {file_path_str} resulted in no chunks, using full text as one chunk.")
+                    text_chunks = [full_text]
+
+
+                initial_summary_text = full_text[:INITIAL_SUMMARY_CHAR_LIMIT]
+                processed_files_data.append({
+                    "file_path": file_path_str, "full_text": full_text, "text_chunks": text_chunks,
+                    "initial_summary_text": initial_summary_text, "metadata": current_metadata
+                })
+                logger.debug(f"Successfully processed file: {file_path_str}, {len(text_chunks)} chunks created.")
         except Exception as e:
-            logger.error(f"Error during SimpleDirectoryReader processing for path {path} with extensions {other_exts}: {e}")
-    
+            logger.error(f"Error during SimpleDirectoryReader processing for path {path} with extensions {other_exts}: {e}", exc_info=True)
+
     if not pdf_exts and not other_exts and required_exts:
         logger.warning(f"Required extensions {required_exts} were specified, but resulted in no files to process.")
-    elif not documents:
+    elif not processed_files_data: 
         logger.warning(f"No documents were loaded from {path} with extensions {required_exts}. Check path and file types.")
+    return processed_files_data
 
-    return documents
 
-
-async def get_dir_summaries(path: str, recursive: bool, required_exts: list, model: Model, custom_prompt: str | None = None, progress_queue: Queue | None = None):
+async def get_dir_summaries(
+    path: str, recursive: bool, required_exts: list, model: Model, 
+    custom_prompt: str | None = None, progress_queue: Queue | None = None,
+    research_topic_prompt: str | None = None,
+    quick_topic_analysis_enabled: bool = False,
+    full_doc_topic_analysis_enabled: bool = False
+):
     if progress_queue:
         progress_queue.put_nowait({"type": "status", "message": "Loading documents..."})
     
-    # load_documents is synchronous, so it will block here.
-    # For true async progress during loading, load_documents would need to be async and yield progress.
-    doc_dicts = load_documents(path, recursive, required_exts) 
+    loaded_file_info_list = load_documents(path, recursive, required_exts) 
     
     if progress_queue:
-        progress_queue.put_nowait({"type": "status", "total_docs_loaded": len(doc_dicts), "message": "Documents loaded."})
-        if not doc_dicts:
+        progress_queue.put_nowait({"type": "status", "total_docs_loaded": len(loaded_file_info_list), "message": "Documents loaded and processed."})
+        if not loaded_file_info_list:
              progress_queue.put_nowait({"type": "status", "message": "No documents found to summarize."})
-             # Early exit if no documents
-             return []
+             return [] 
+
+    # Prepare list of (Document for summary, full file_info_item)
+    docs_and_file_info_for_processing = []
+    for file_info_item in loaded_file_info_list:
+        doc_for_summary = Document(
+            text=file_info_item["initial_summary_text"], # Use initial text for basic summary
+            metadata=file_info_item["metadata"] 
+        )
+        # For ImageDocument, file_info_item might be less structured if not from load_documents.
+        # However, load_documents doesn't produce ImageDocument objects.
+        # This assumes ImageDocuments are handled separately or not mixed here.
+        # If they can appear, special handling for file_info_item for images might be needed.
+        # For now, assuming all items in loaded_file_info_list are dicts from text file processing.
+        docs_and_file_info_for_processing.append((doc_for_summary, file_info_item))
 
 
-    await remove_deleted_files() # This is quick, no progress needed for now
+    await remove_deleted_files() 
     
     if progress_queue:
-        progress_queue.put_nowait({"type": "status", "total_docs_for_summary": len(doc_dicts), "message": "Starting summarization process..."})
+        progress_queue.put_nowait({"type": "status", "total_docs_for_summary": len(docs_and_file_info_for_processing), "message": "Starting summarization and analysis process..."})
 
-    files_summaries = await get_summaries(doc_dicts, model=model, custom_prompt=custom_prompt, progress_queue=progress_queue)
+    all_processed_data = await get_summaries(
+        docs_and_file_info_for_processing, model=model, 
+        custom_prompt=custom_prompt, progress_queue=progress_queue,
+        research_topic_prompt=research_topic_prompt,
+        quick_topic_analysis_enabled=quick_topic_analysis_enabled,
+        full_doc_topic_analysis_enabled=full_doc_topic_analysis_enabled
+    )
 
-    # Convert path to relative path
-    for summary_item in files_summaries: # Renamed 'summary' to 'summary_item'
-        if 'file_path' in summary_item: # Ensure 'file_path' exists
-             summary_item["file_path"] = os.path.relpath(summary_item["file_path"], path)
+    # Convert path to relative path in the final results
+    for item_data in all_processed_data: 
+        if 'file_path' in item_data: 
+             item_data["file_path"] = os.path.relpath(item_data["file_path"], path)
     
     if progress_queue:
-        progress_queue.put_nowait({"type": "status", "message": "Summarization complete for all documents."})
-    return files_summaries
+        progress_queue.put_nowait({"type": "status", "message": "Summarization and analysis complete for all documents."})
+    return all_processed_data
 
 
 async def run(
@@ -290,64 +512,196 @@ async def run(
     llm_provider: str = "openai", 
     ollama_api_base_url: str | None = None, 
     custom_summarization_prompt: str | None = None,
-    progress_queue: Queue | None = None # Added from server.py
+    progress_queue: Queue | None = None,
+    research_topic_prompt: str | None = None,
+    quick_topic_analysis_enabled: bool = False,
+    full_doc_topic_analysis_enabled: bool = False,
+    semantic_search_enabled: bool = False # Placeholder, not used in this phase's logic directly
 ):
     try:
-        logger.info("Starting FileWizardAI run...")
+        logger.info(f"Starting FileWizardAI run with analysis options: research_topic='{research_topic_prompt is not None}', "
+                    f"quick_analysis={quick_topic_analysis_enabled}, full_analysis={full_doc_topic_analysis_enabled}, "
+                    f"semantic_search={semantic_search_enabled}")
         if progress_queue:
             progress_queue.put_nowait({"type": "status", "message": "Initializing FileWizardAI..."})
 
         model = Model(llm_provider=llm_provider, ollama_api_base_url=ollama_api_base_url)
         
         if progress_queue:
-            progress_queue.put_nowait({"type": "status", "message": "Starting directory analysis and document summarization..."})
+            progress_queue.put_nowait({"type": "status", "message": "Starting directory analysis, document summarization, and topic analysis..."})
         
-        summaries = await get_dir_summaries(
+        # get_dir_summaries now returns a list of dicts, each containing summary and analysis data
+        processed_file_data_list = await get_dir_summaries(
             directory_path, recursive, required_exts, model=model, 
-            custom_prompt=custom_summarization_prompt, progress_queue=progress_queue
+            custom_prompt=custom_summarization_prompt, progress_queue=progress_queue,
+            research_topic_prompt=research_topic_prompt,
+            quick_topic_analysis_enabled=quick_topic_analysis_enabled,
+            full_doc_topic_analysis_enabled=full_doc_topic_analysis_enabled
         )
         
-        if not summaries: # If no summaries (e.g., no documents found or all failed), can end early.
-            logger.info("No summaries generated, concluding run.")
+        if not processed_file_data_list: 
+            logger.info("No files processed or summaries generated, concluding run.")
             if progress_queue:
-                progress_queue.put_nowait({"type": "status", "message": "No summaries generated. File tree generation skipped."})
-            return [] # Return empty list as no files to process for tree
+                progress_queue.put_nowait({"type": "status", "message": "No files processed. File tree generation skipped."})
+            return [] 
 
         if progress_queue:
             progress_queue.put_nowait({"type": "status", "message": "Generating file tree based on summaries..."})
         
-        files = await model.create_file_tree_api(summaries, progress_queue=progress_queue)
+        # model.create_file_tree_api expects a list of {"file_path": ..., "summary": ...}
+        # Ensure processed_file_data_list items are compatible or adapt them.
+        # Current processed_file_data_list contains the full dict from summarize_document.
+        # We need to pass only the summary and file_path for tree generation.
+        summaries_for_tree_generation = [
+            {"file_path": item.get("file_path"), "summary": item.get("summary")}
+            for item in processed_file_data_list if item.get("file_path") and item.get("summary")
+        ]
+
+        files_for_tree_output = await model.create_file_tree_api(summaries_for_tree_generation, progress_queue=progress_queue)
         
         if progress_queue:
             progress_queue.put_nowait({"type": "status", "message": "File tree generation complete."})
-
-        # The original code returned `files`, which is a list of {"src_path": ..., "dst_path": ...}
-        # The tree structure was for local processing not the return value.
-        # Keeping it consistent:
         
         logger.info("FileWizardAI run completed successfully.")
-        if progress_queue: # Final status before completion if needed, though server.py sends task_completed
+        if progress_queue: 
             progress_queue.put_nowait({"type": "status", "message": "Process completed successfully."})
-        return files
+        # The final output for the 'run' endpoint is the list of {"src_path": ..., "dst_path": ...} for file moving.
+        # The processed_file_data_list (containing summaries and analysis) is used internally but not the final return of 'run'.
+        
+        # Start Embedding Pipeline if enabled
+        if semantic_search_enabled and processed_file_data_list:
+            logger.info(f"Semantic search enabled. Starting embedding pipeline for {len(processed_file_data_list)} files.")
+            if progress_queue:
+                progress_queue.put_nowait({"type": "status", "message": "Starting embedding generation and storage..."})
+            
+            embedded_files_count = 0
+            for file_idx, file_data in enumerate(processed_file_data_list):
+                relative_file_path = file_data.get('file_path') # This is relative from get_dir_summaries
+                if not relative_file_path:
+                    logger.warning(f"Skipping embedding for file_data at index {file_idx} due to missing 'file_path'.")
+                    continue
+
+                # Construct absolute_file_path based on the initial directory_path given to 'run'
+                absolute_file_path = os.path.join(directory_path, relative_file_path)
+                
+                logger.info(f"Processing file for embedding: {absolute_file_path}")
+                if progress_queue:
+                    progress_queue.put_nowait({
+                        "type": "embedding_progress", 
+                        "current_file_num": file_idx + 1,
+                        "total_files": len(processed_file_data_list),
+                        "file": relative_file_path,
+                        "status": "starting_chunk_processing"
+                    })
+
+                text_chunks_for_file = file_data.get('text_chunks', [])
+                if not text_chunks_for_file:
+                    logger.info(f"No text chunks found for {absolute_file_path}. Skipping embedding for this file.")
+                    # Ensure old chunks are deleted if file content changed to empty
+                    db.insert_document_chunks(absolute_file_path, []) # Deletes old, inserts none
+                    vector_store_service.delete_chunks_for_file(absolute_file_path)
+                    continue
+
+                # 1. Store/Update chunks in SQLite document_chunks table
+                db_chunk_objects = [{'chunk_order': i, 'chunk_text': text} for i, text in enumerate(text_chunks_for_file)]
+                db.insert_document_chunks(absolute_file_path, db_chunk_objects) # Deletes old, inserts new
+
+                # 2. Fetch these chunks back to get their SQLite IDs
+                persisted_chunks = db.get_document_chunks(absolute_file_path)
+                if not persisted_chunks:
+                    logger.warning(f"Failed to retrieve persisted chunks from SQLite for {absolute_file_path}. Skipping embedding for this file.")
+                    continue
+                
+                chroma_chunks_data = []
+                processed_chunks_for_file = 0
+                for p_chunk in persisted_chunks:
+                    chunk_text = p_chunk.get('chunk_text')
+                    chunk_id_db = p_chunk.get('id')
+
+                    if not chunk_text or chunk_id_db is None:
+                        logger.warning(f"Skipping a chunk for {absolute_file_path} due to missing text or DB ID.")
+                        continue
+                    
+                    # 3. Generate embedding for the chunk
+                    # Ensure embedding_service is ready
+                    if not embedding_service or not embedding_service.model:
+                        logger.error("Embedding service or model not available. Halting embedding pipeline.")
+                        if progress_queue: progress_queue.put_nowait({"type": "error", "message": "Embedding service not available."})
+                        # Potentially break or return early from the main run function if embedding is critical
+                        return files_for_tree_output # Or raise an exception
+                        
+                    embedding_vector = embedding_service.get_embedding(chunk_text)
+
+                    if embedding_vector:
+                        # 4. Update SQLite chunk with its embedding
+                        try:
+                            embedding_json_bytes = json.dumps(embedding_vector).encode('utf-8')
+                            db.update_chunk_embedding(chunk_id_db, sqlite3.Binary(embedding_json_bytes))
+                        except Exception as e_sql_update:
+                            logger.error(f"Error updating SQLite chunk {chunk_id_db} with embedding for {absolute_file_path}: {e_sql_update}", exc_info=True)
+                            # Decide if to skip this chunk for ChromaDB or handle error
+                            continue # Skip this chunk for Chroma
+
+                        # 5. Prepare data for ChromaDB
+                        chroma_chunks_data.append({
+                            'chunk_id_db': chunk_id_db, # This is the ID from SQLite's document_chunks table
+                            'chunk_text': chunk_text,
+                            'embedding': embedding_vector
+                        })
+                        processed_chunks_for_file +=1
+                    else:
+                        logger.warning(f"Failed to generate embedding for chunk ID {chunk_id_db} of file {absolute_file_path}.")
+                
+                # 6. Store embeddings in ChromaDB for the current file
+                if chroma_chunks_data:
+                    logger.info(f"Adding {len(chroma_chunks_data)} chunk embeddings to vector store for {absolute_file_path}.")
+                    add_to_chroma_success = vector_store_service.add_chunk_embeddings(absolute_file_path, chroma_chunks_data)
+                    if add_to_chroma_success:
+                        logger.info(f"Successfully added embeddings to vector store for {absolute_file_path}.")
+                        embedded_files_count += 1
+                    else:
+                        logger.error(f"Failed to add embeddings to vector store for {absolute_file_path}.")
+                elif text_chunks_for_file : # Had chunks but none could be processed/embedded
+                     logger.warning(f"No valid embeddings generated to store in ChromaDB for {absolute_file_path} despite having text chunks.")
+                
+                if progress_queue:
+                     progress_queue.put_nowait({
+                        "type": "embedding_progress",
+                        "current_file_num": file_idx + 1,
+                        "total_files": len(processed_file_data_list),
+                        "file": relative_file_path,
+                        "status": "completed_chunk_processing",
+                        "processed_chunks_for_file": processed_chunks_for_file,
+                        "total_chunks_in_file": len(text_chunks_for_file)
+                    })
+
+            logger.info(f"Embedding pipeline completed. Successfully processed and stored embeddings for {embedded_files_count}/{len(processed_file_data_list)} files.")
+            if progress_queue:
+                progress_queue.put_nowait({"type": "status", "message": f"Embedding generation and storage complete for {embedded_files_count} files."})
+        elif semantic_search_enabled and not processed_file_data_list:
+            logger.info("Semantic search enabled, but no files were processed to generate embeddings for.")
+            if progress_queue:
+                progress_queue.put_nowait({"type": "status", "message": "No files processed; embedding step skipped."})
+
+
+        return files_for_tree_output 
     
     except asyncio.CancelledError:
         logger.info("FileWizardAI run was cancelled.")
         if progress_queue:
-            # This message might not reach if the task is cancelled very abruptly.
-            # server.py's event_generator should also handle this.
             try:
                 progress_queue.put_nowait({"type": "cancelled", "message": "Task cancelled during core run execution."})
-            except Exception as e_q:
+            except Exception as e_q: # pragma: no cover
                 logger.error(f"Failed to put cancellation message in queue: {e_q}")
-        raise # Re-raise to be handled by the server's event_generator
+        raise 
     except Exception as e:
         logger.error(f"Error during FileWizardAI run: {e}", exc_info=True)
         if progress_queue:
             try:
                 progress_queue.put_nowait({"type": "error", "message": f"An unexpected error occurred in core run: {str(e)}"})
-            except Exception as e_q:
+            except Exception as e_q: # pragma: no cover
                 logger.error(f"Failed to put error message in queue: {e_q}")
-        raise # Re-raise to ensure server knows task failed
+        raise 
 
 
 def update_file(root_path, item):
@@ -358,7 +712,7 @@ def update_file(root_path, item):
         os.makedirs(dst_dir)
     if os.path.isfile(src_file):
         shutil.move(src_file, dst_file)
-        new_hash = get_file_hash(dst_file)
+        new_hash = get_file_hash(dst_file) # Recalculate hash after move
         db.update_file(src_file, dst_file, new_hash)
 
 
@@ -370,33 +724,61 @@ async def search_files(
     llm_provider: str = "openai", 
     ollama_api_base_url: str | None = None, 
     custom_summarization_prompt: str | None = None,
-    progress_queue: Queue | None = None # Added for consistency, though search is not SSE yet
+    progress_queue: Queue | None = None,
+    # Adding analysis params for consistency, though search doesn't use them for its core logic yet
+    research_topic_prompt: str | None = None,
+    quick_topic_analysis_enabled: bool = False,
+    full_doc_topic_analysis_enabled: bool = False 
 ):
-    # Note: search_files is not currently an SSE endpoint, so progress_queue might not be used by the caller.
-    # However, adding it for internal consistency if we decide to make search SSE later.
     if progress_queue:
         progress_queue.put_nowait({"type": "status", "message": "Search process started..."})
 
     model = Model(llm_provider=llm_provider, ollama_api_base_url=ollama_api_base_url)
     
-    # Pass progress_queue to get_dir_summaries if search were to be SSE.
-    summaries = await get_dir_summaries(
+    # get_dir_summaries will perform summarization and potentially analysis
+    # The returned data will include summaries and any analysis performed.
+    processed_file_data_list = await get_dir_summaries(
         root_path, recursive, required_exts, model=model, 
-        custom_prompt=custom_summarization_prompt, progress_queue=progress_queue 
+        custom_prompt=custom_summarization_prompt, progress_queue=progress_queue,
+        research_topic_prompt=research_topic_prompt,
+        quick_topic_analysis_enabled=quick_topic_analysis_enabled,
+        full_doc_topic_analysis_enabled=full_doc_topic_analysis_enabled
     )
     
     if progress_queue:
         progress_queue.put_nowait({"type": "status", "message": "Searching through summaries..."})
+    
+    # model.search_files_api expects a list of {"file_path": ..., "summary": ...}
+    # Adapt processed_file_data_list for this.
+    summaries_for_search = [
+        {"file_path": item.get("file_path"), "summary": item.get("summary")}
+        for item in processed_file_data_list if item.get("file_path") and item.get("summary")
+    ]
         
-    files = await model.search_files_api(summaries, search_query, progress_queue=progress_queue) 
+    files_found = await model.search_files_api(summaries_for_search, search_query, progress_queue=progress_queue) 
     
     if progress_queue:
         progress_queue.put_nowait({"type": "status", "message": "Search process completed."})
         
-    return files
+    return files_found
 
 
 def get_file_hash(file_path):
+        if progress_queue:
+    # It's important that this function is robust to file not existing during hashing
+    # e.g. if a file is deleted between discovery and processing.
+    try:
+        hash_func = hashlib.new('sha256')
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(8192):
+                hash_func.update(chunk)
+        return hash_func.hexdigest()
+    except FileNotFoundError:
+        logger.error(f"File not found during hash calculation: {file_path}")
+        return None # Or raise an error, or return a specific sentinel value
+    except Exception as e: # pragma: no cover
+        logger.error(f"Error calculating hash for {file_path}: {e}", exc_info=True)
+        return None
     hash_func = hashlib.new('sha256')
     with open(file_path, 'rb') as f:
         while chunk := f.read(8192):

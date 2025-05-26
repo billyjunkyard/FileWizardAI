@@ -1,7 +1,10 @@
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from .run import run, update_file, search_files # 'run' will be modified to accept progress_queue
+from .run import run, update_file, search_files
+from .embedding_service import embedding_service
+from .vector_store_service import vector_store_service
+from .settings import Model as SettingsModel # Renamed to avoid conflict with 'Model' from Pydantic/FastAPI
 import os
 import subprocess
 import platform
@@ -10,10 +13,11 @@ from fastapi.responses import FileResponse
 import asyncio
 import json
 from sse_starlette.sse import EventSourceResponse
-from typing import Dict
+from typing import Dict, List # Added List
 from asyncio import Task, Queue
 import uuid
 import logging
+# import json # json is already imported by run.py, but good to have explicitly if needed directly in server
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +251,159 @@ async def cancel_task_endpoint(task_id: str):
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+@app.get("/semantic_search/")
+async def semantic_search_endpoint(
+    query_text: str = Query(..., description="The text to search for."),
+    top_n: int = Query(5, description="Number of top similar chunks to retrieve.", ge=1, le=50),
+    file_paths_json: str = Query(None, description="Optional JSON string array of specific file paths to search within. Example: [\"/path/to/doc1.txt\", \"/path/to/doc2.pdf\"]")
+):
+    logger.info(f"Received semantic search request: query_text='{query_text[:50]}...', top_n={top_n}, file_paths_json='{file_paths_json}'")
+
+    parsed_file_paths = None
+    if file_paths_json:
+        try:
+            parsed_file_paths = json.loads(file_paths_json)
+            if not isinstance(parsed_file_paths, list) or not all(isinstance(fp, str) for fp in parsed_file_paths):
+                logger.error(f"Invalid format for file_paths_json. Expected list of strings. Got: {parsed_file_paths}")
+                raise HTTPException(status_code=400, detail="Invalid format for file_paths_json. Must be a JSON array of strings.")
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse file_paths_json: {file_paths_json}", exc_info=True)
+            raise HTTPException(status_code=400, detail="Invalid JSON format for file_paths_json.")
+
+    if not embedding_service or not embedding_service.model:
+        logger.error("Embedding service or model not available for semantic search.")
+        raise HTTPException(status_code=503, detail="Embedding service not available. Please try again later.")
+    if not vector_store_service or not vector_store_service.collection:
+        logger.error("Vector store service or collection not available for semantic search.")
+        raise HTTPException(status_code=503, detail="Vector store service not available. Please try again later.")
+
+    if not query_text.strip():
+        logger.warning("Semantic search query text is empty.")
+        return [] 
+
+    query_embedding = None
+    try:
+        query_embedding = embedding_service.get_embedding(query_text)
+    except Exception as e_embed: 
+        logger.error(f"Error generating query embedding for '{query_text[:50]}...': {e_embed}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate query embedding.")
+
+    if query_embedding is None:
+        logger.warning(f"Could not generate embedding for query text: '{query_text[:50]}...'")
+        raise HTTPException(status_code=400, detail="Could not generate embedding for the provided query text.")
+
+    logger.info(f"Generated query embedding (first 5 dims): {query_embedding[:5]}")
+
+    try:
+        search_results = vector_store_service.search_similar_chunks(
+            query_embedding=query_embedding, top_n=top_n, file_paths=parsed_file_paths
+        )
+        logger.info(f"Semantic search found {len(search_results)} results for query '{query_text[:50]}...'.")
+        return search_results
+    except Exception as e_search:
+        logger.error(f"Error during vector store search for query '{query_text[:50]}...': {e_search}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error performing search in vector store.")
+
+@app.get("/answer_question/")
+async def answer_question_endpoint(
+    query_text: str = Query(..., description="The user's question."),
+    top_n_chunks: int = Query(3, description="Number of relevant chunks to retrieve for context.", ge=1, le=10),
+    file_paths_json: str = Query(None, description="Optional JSON string array of specific file paths to search within.")
+):
+    logger.info(f"Received Q&A request: query_text='{query_text[:50]}...', top_n_chunks={top_n_chunks}, file_paths_json='{file_paths_json}'")
+
+    parsed_file_paths = None
+    if file_paths_json:
+        try:
+            parsed_file_paths = json.loads(file_paths_json)
+            if not isinstance(parsed_file_paths, list) or not all(isinstance(fp, str) for fp in parsed_file_paths):
+                logger.error(f"Invalid format for file_paths_json in Q&A. Expected list of strings. Got: {parsed_file_paths}")
+                raise HTTPException(status_code=400, detail="Invalid format for file_paths_json. Must be a JSON array of strings.")
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse file_paths_json in Q&A: {file_paths_json}", exc_info=True)
+            raise HTTPException(status_code=400, detail="Invalid JSON format for file_paths_json.")
+
+    # Service availability checks
+    if not embedding_service or not embedding_service.model:
+        logger.error("Embedding service or model not available for Q&A.")
+        raise HTTPException(status_code=503, detail="Embedding service not available.")
+    if not vector_store_service or not vector_store_service.collection:
+        logger.error("Vector store service or collection not available for Q&A.")
+        raise HTTPException(status_code=503, detail="Vector store service not available.")
+    
+    # Instantiate Model from settings for LLM call - assuming default provider for now
+    # In a more complex app, llm_provider might come from request or global config.
+    try:
+        model_instance = SettingsModel() # Uses defaults from .env or hardcoded in Settings
+        if not model_instance.async_text_clients: # Check if clients were initialized
+             logger.error("LLM text clients are not configured in Model settings for Q&A.")
+             raise HTTPException(status_code=503, detail="LLM service not configured.")
+    except Exception as e_model_init:
+        logger.error(f"Failed to initialize Model for Q&A: {e_model_init}", exc_info=True)
+        raise HTTPException(status_code=503, detail="LLM service initialization failed.")
+
+
+    if not query_text.strip():
+        logger.warning("Q&A query text is empty.")
+        raise HTTPException(status_code=400, detail="Query text cannot be empty.")
+
+    # Generate query embedding
+    query_embedding = None
+    try:
+        query_embedding = embedding_service.get_embedding(query_text)
+    except Exception as e_embed:
+        logger.error(f"Error generating query embedding for Q&A '{query_text[:50]}...': {e_embed}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate query embedding for Q&A.")
+    
+    if query_embedding is None:
+        logger.warning(f"Could not generate embedding for Q&A query: '{query_text[:50]}...'")
+        raise HTTPException(status_code=400, detail="Could not generate embedding for the Q&A query text.")
+
+    # Search for relevant chunks
+    relevant_chunks = []
+    try:
+        relevant_chunks = vector_store_service.search_similar_chunks(
+            query_embedding=query_embedding,
+            top_n=top_n_chunks,
+            file_paths=parsed_file_paths
+        )
+    except Exception as e_search:
+        logger.error(f"Error searching for relevant chunks for Q&A query '{query_text[:50]}...': {e_search}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error searching for relevant document chunks.")
+
+    if not relevant_chunks:
+        logger.info(f"No relevant chunks found for Q&A query: '{query_text[:50]}...'")
+        return {"answer": "Could not find relevant documents to answer the question.", "source_chunks": []}
+
+    # Construct context string
+    context_string = "\n\n---\n\n".join([chunk['chunk_text'] for chunk in relevant_chunks if chunk.get('chunk_text')])
+    logger.info(f"Constructed context string of length {len(context_string)} from {len(relevant_chunks)} chunks for Q&A query '{query_text[:50]}...'.")
+    if not context_string.strip():
+        logger.warning(f"Context string is empty after processing relevant chunks for Q&A query: '{query_text[:50]}...'")
+        return {"answer": "Relevant document chunks found, but they contain no text to form an answer.", "source_chunks": relevant_chunks}
+
+    # Call LLM to generate answer
+    answer = None
+    try:
+        # Progress queue for LLM call is not directly used by this synchronous endpoint response for now.
+        # If this were an SSE endpoint, it would be passed.
+        answer = await model_instance.generate_answer_from_context(
+            question=query_text,
+            context=context_string,
+            progress_queue=None # No SSE progress for this specific Q&A response
+        )
+    except Exception as e_llm:
+        logger.error(f"Error generating answer from LLM for Q&A query '{query_text[:50]}...': {e_llm}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error generating answer from language model.")
+
+    if answer is None:
+        logger.warning(f"LLM did not return an answer for Q&A query: '{query_text[:50]}...'")
+        # This case might be handled by the prompt ("I cannot answer..."), but if LLM returns nothing:
+        answer = "The language model did not provide an answer based on the context."
+
+    return {"answer": answer, "source_chunks": relevant_chunks}
 
 
 if __name__ == "__main__":

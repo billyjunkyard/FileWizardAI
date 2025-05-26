@@ -392,6 +392,241 @@ class Model:
             progress_queue.put_nowait({"type": "llm_api_end", "api_call": "search_files_api_chunk", "success": bool(search_results_chunk)})
         return search_results_chunk
 
+    async def analyze_text_for_topic_api(self, text_content: str, research_topic: str, 
+                                         analysis_type: str, # analysis_type can be used for logging or minor prompt adjustments
+                                         progress_queue: Queue | None = None, 
+                                         file_path_for_logging: str = "Unknown file") -> dict | None:
+        """
+        Analyzes text content for relevance to a research topic, identifies sub-topics,
+        and describes connections using an LLM.
+        """
+        system_prompt = f"""
+You are an AI research assistant. Your task is to analyze the provided text content based on the given research topic.
+The research topic is: "{research_topic}"
+
+Analyze the text and provide your response in a JSON object with the following exact structure:
+{{
+  "is_relevant": <boolean>,
+  "sub_topics": ["<list of string sub-topics or key points relevant to the research_topic found in the text>"],
+  "connections": "<string describing how the text content connects to broader questions, themes, or implications related to the research_topic>"
+}}
+
+Instructions:
+- "is_relevant": Must be true if the text content is directly relevant to the research topic, false otherwise.
+- "sub_topics": List key sub-topics or distinct points from the text that are directly related to the research topic. If no specific sub-topics are found but the text is relevant, provide a general statement or an empty list.
+- "connections": Provide a concise text description of how the text connects to the research topic. If not relevant, explain briefly why.
+- Ensure the output is ONLY the JSON object. Do not include any introductory text, markdown formatting like ```json, or concluding remarks.
+""".strip()
+
+        user_content = text_content
+
+        if progress_queue:
+            progress_queue.put_nowait({
+                "type": "llm_api_start", 
+                "file": file_path_for_logging, 
+                "api_call": "analyze_text_for_topic_api",
+                "analysis_type": analysis_type 
+            })
+
+        attempt = 0
+        analysis_result_dict = None
+        # Using 5 attempts, similar to summarize_document_api
+        while attempt < 5:
+            try:
+                if not self.async_text_clients or self.text_keys_count == 0:
+                    logger.error(f"No text clients available for analysis API for {file_path_for_logging}.")
+                    raise ValueError("AsyncOpenAI text clients for analysis are not configured or empty.")
+
+                # Determine if JSON mode is supported (specific to OpenAI clients for now)
+                client_supports_json_mode = False
+                if self.llm_provider == "openai" and hasattr(self.async_text_clients[0].chat.completions, 'create'):
+                     # A bit of a heuristic: if it's OpenAI and has 'create', it likely supports response_format
+                     # This check can be refined if we have more specific client capabilities.
+                     client_supports_json_mode = True
+
+
+                completion_params = {
+                    "model": self.TEXT_MODEL_NAME,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    "stream": False,
+                    "temperature": 0.0, # For deterministic output
+                    "timeout": 90.0, # Increased timeout for potentially complex analysis
+                }
+
+                if client_supports_json_mode:
+                    completion_params["response_format"] = {"type": "json_object"}
+                    logger.info(f"Using JSON mode for LLM call for {file_path_for_logging}, analysis type: {analysis_type}")
+                else:
+                    logger.info(f"Not using explicit JSON mode (or provider is not OpenAI like) for {file_path_for_logging}, analysis type: {analysis_type}. Relying on prompt for JSON output.")
+
+
+                chat_completion = await self.async_text_clients[
+                    self.cnt_txt % self.text_keys_count].chat.completions.create(**completion_params) # type: ignore
+                
+                raw_response_content = chat_completion.choices[0].message.content
+                
+                if not raw_response_content:
+                    logger.warning(f"LLM returned empty content for {file_path_for_logging}, attempt {attempt+1}.")
+                    # Consider this a failure for this attempt
+                    raise ValueError("LLM returned empty content.")
+
+                # Attempt to parse the JSON
+                try:
+                    # Remove potential markdown formatting if not in JSON mode
+                    if not client_supports_json_mode:
+                        cleaned_response = raw_response_content.strip()
+                        if cleaned_response.startswith("```json"):
+                            cleaned_response = cleaned_response[len("```json"):]
+                        if cleaned_response.endswith("```"):
+                            cleaned_response = cleaned_response[:-len("```")]
+                        cleaned_response = cleaned_response.strip()
+                        parsed_json = json.loads(cleaned_response)
+                    else:
+                        parsed_json = json.loads(raw_response_content)
+
+                except json.JSONDecodeError as json_e:
+                    logger.error(f"JSON parsing failed for {file_path_for_logging}, attempt {attempt+1}. Error: {json_e}. Response: {raw_response_content[:500]}")
+                    # This attempt failed, will retry
+                    raise # Re-raise to be caught by the outer try-except
+
+                # Validate structure
+                if not all(key in parsed_json for key in ["is_relevant", "sub_topics", "connections"]):
+                    logger.error(f"Missing expected keys in LLM JSON response for {file_path_for_logging}, attempt {attempt+1}. Response: {parsed_json}")
+                    raise ValueError("Missing expected keys in LLM JSON response.")
+                
+                if not isinstance(parsed_json["is_relevant"], bool):
+                    logger.warning(f"'is_relevant' is not a boolean for {file_path_for_logging}. Value: {parsed_json['is_relevant']}. Coercing if possible or failing.")
+                    # Attempt to coerce, or handle as error. For now, let's be strict.
+                    raise ValueError("'is_relevant' field is not a boolean.")
+
+                if not isinstance(parsed_json["sub_topics"], list):
+                    logger.warning(f"'sub_topics' is not a list for {file_path_for_logging}. Value: {parsed_json['sub_topics']}. Coercing if possible or failing.")
+                    raise ValueError("'sub_topics' field is not a list.")
+
+                analysis_result_dict = parsed_json
+                break # Success
+            
+            except Exception as e:
+                logger.error(f"Error in analyze_text_for_topic_api for {file_path_for_logging} (type: {analysis_type}), attempt {attempt+1}: {e}")
+                attempt += 1
+                self.cnt_txt += 1 # Rotate API key/client
+                if attempt >= 5:
+                    if progress_queue:
+                        progress_queue.put_nowait({
+                            "type": "llm_api_failed_final", 
+                            "file": file_path_for_logging, 
+                            "api_call": "analyze_text_for_topic_api", 
+                            "error": str(e)
+                        })
+                    logger.error(f"Final attempt failed for analyze_text_for_topic_api for {file_path_for_logging}.")
+                    analysis_result_dict = None # Ensure it's None on final failure
+                else:
+                    import asyncio # Import here if not already at top level of file
+                    await asyncio.sleep(1 + attempt) # Exponential backoff, simple version
+
+        if progress_queue:
+            progress_queue.put_nowait({
+                "type": "llm_api_end", 
+                "file": file_path_for_logging, 
+                "api_call": "analyze_text_for_topic_api", 
+                "success": analysis_result_dict is not None
+            })
+        
+        return analysis_result_dict
+
+    async def generate_answer_from_context(self, question: str, context: str, 
+                                           progress_queue: Queue | None = None, 
+                                           file_path_for_logging: str = "Q&A_request") -> str | None:
+        """
+        Generates an answer to a question based strictly on the provided context using an LLM.
+        """
+        system_prompt = """
+You are a helpful AI assistant. Your task is to answer the user's question based *only* on the provided context.
+If the context does not contain enough information to answer the question, you must explicitly state: 
+'I cannot answer the question based on the provided documents.'
+Do not use any external knowledge or make assumptions beyond the provided text.
+Be concise and directly answer the question.
+""".strip()
+
+        user_prompt_for_llm = f"Context:\n---\n{context}\n---\n\nQuestion: {question}"
+
+        if progress_queue:
+            progress_queue.put_nowait({
+                "type": "llm_api_start", 
+                "file": file_path_for_logging, # Using file_path_for_logging to denote the Q&A operation
+                "api_call": "generate_answer_from_context"
+            })
+
+        attempt = 0
+        answer = None
+        # Using 3-5 attempts for consistency with other methods. Let's use 3 for Q&A.
+        while attempt < 3:
+            try:
+                if not self.async_text_clients or self.text_keys_count == 0:
+                    logger.error(f"No text clients available for Q&A API ({file_path_for_logging}).")
+                    raise ValueError("AsyncOpenAI text clients for Q&A are not configured or empty.")
+
+                chat_completion = await self.async_text_clients[
+                    self.cnt_txt % self.text_keys_count].chat.completions.create(
+                    model=self.TEXT_MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt_for_llm},
+                    ],
+                    stream=False,
+                    temperature=0.1, # Slightly higher for more natural answer, but still aiming for factuality
+                    timeout=60.0, 
+                )
+                
+                answer_content = chat_completion.choices[0].message.content
+                
+                if not answer_content or not answer_content.strip():
+                    logger.warning(f"LLM returned empty or whitespace content for Q&A ({file_path_for_logging}), attempt {attempt+1}.")
+                    # Consider this a failure for this attempt, maybe the model can't answer
+                    answer = "The model returned an empty response. It might be unable to answer based on the context." # Provide a default if it's empty
+                else:
+                    answer = answer_content.strip()
+                
+                break # Success
+            
+            except Exception as e:
+                logger.error(f"Error in generate_answer_from_context for '{file_path_for_logging}', attempt {attempt+1}: {e}", exc_info=True)
+                attempt += 1
+                self.cnt_txt += 1 # Rotate API key/client
+                if attempt >= 3:
+                    if progress_queue:
+                        progress_queue.put_nowait({
+                            "type": "llm_api_failed_final", 
+                            "file": file_path_for_logging, 
+                            "api_call": "generate_answer_from_context", 
+                            "error": str(e)
+                        })
+                    logger.error(f"Final attempt failed for generate_answer_from_context for '{file_path_for_logging}'.")
+                    answer = None # Ensure answer is None on final failure
+                else:
+                    # Need to import asyncio if not already available at class/module level
+                    # For simplicity, assuming asyncio is available or this is refactored to be top-level
+                    import asyncio 
+                    await asyncio.sleep(1 + attempt) # Exponential backoff
+
+        if progress_queue:
+            progress_queue.put_nowait({
+                "type": "llm_api_end", 
+                "file": file_path_for_logging, 
+                "api_call": "generate_answer_from_context", 
+                "success": answer is not None
+            })
+        
+        return answer
+
+    async def search_files_api_chunk(self, summaries: list, search_query: str, progress_queue: Queue | None = None):
+        return search_results_chunk
+
+    # Ensure asyncio is imported if it was conditionally imported within a method
+    # import asyncio # Uncomment if not already at the top level
 
 class CustomFormatter(logging.Formatter):
     grey = "\x1b[38;5;15m"

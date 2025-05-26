@@ -28,4 +28,26 @@ export class DataService {
   openFile(fileToOpen: any): Observable<any> {
     return this.http.post<any>(this.apiUrl + "/open_file", { file_path: fileToOpen });
   }
+
+  semanticSearch(queryText: string, topN: number, filePaths?: string[]): Observable<any> {
+    let params = new HttpParams()
+      .set('query_text', queryText)
+      .set('top_n', topN.toString());
+
+    if (filePaths && filePaths.length > 0) {
+      params = params.set('file_paths_json', JSON.stringify(filePaths));
+    }
+    return this.http.get<any>(`${this.apiUrl}/semantic_search/`, { params });
+  }
+
+  answerQuestion(queryText: string, topNChunks: number, filePaths?: string[]): Observable<any> {
+    let params = new HttpParams()
+      .set('query_text', queryText)
+      .set('top_n_chunks', topNChunks.toString());
+
+    if (filePaths && filePaths.length > 0) {
+      params = params.set('file_paths_json', JSON.stringify(filePaths));
+    }
+    return this.http.get<any>(`${this.apiUrl}/answer_question/`, { params });
+  }
 }

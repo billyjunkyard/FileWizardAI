@@ -83,6 +83,39 @@ interface ExtensionGroup {
             </mat-form-field>
           </div>
 
+          <!-- Deep Analysis Section -->
+          <div class="deep-analysis-section">
+            <mat-checkbox [(ngModel)]="deepAnalysisModeEnabled" color="primary" class="deep-analysis-mode-check">
+              Enable Deep Analysis Mode
+            </mat-checkbox>
+
+            <div *ngIf="deepAnalysisModeEnabled" class="deep-analysis-options">
+              <mat-form-field appearance="outline" class="research-topic-field">
+                <mat-label>Research Topic/Question for Analysis</mat-label>
+                <input matInput [(ngModel)]="researchTopicPrompt" placeholder="Enter topic or question for analysis features">
+              </mat-form-field>
+
+              <mat-checkbox [(ngModel)]="quickTopicAnalysisEnabled" 
+                            [disabled]="!researchTopicPrompt || !researchTopicPrompt.trim()"
+                            color="primary" 
+                            matTooltip="Analyzes the summary of the document. Requires a Research Topic.">
+                Quick Topic Analysis (uses document summary)
+              </mat-checkbox>
+              <mat-checkbox [(ngModel)]="fullDocTopicAnalysisEnabled" 
+                            [disabled]="!researchTopicPrompt || !researchTopicPrompt.trim()"
+                            color="primary" 
+                            matTooltip="Analyzes the full text of the document. Requires a Research Topic.">
+                In-depth Topic Analysis (uses full document text)
+              </mat-checkbox>
+              <mat-checkbox [(ngModel)]="semanticSearchEnabled" 
+                            color="primary"
+                            matTooltip="Processes all document chunks for semantic search and Q&A. Can be time-consuming.">
+                Enable Semantic Search & Q&A
+              </mat-checkbox>
+            </div>
+          </div>
+          <!-- End Deep Analysis Section -->
+
           <div class="extensions-section">
             <div class="extensions-header">
               <h3>File Extensions</h3>
@@ -134,7 +167,7 @@ interface ExtensionGroup {
           </div>
         </div>
 
-        <div class="search-section">
+        <div class="search-section"> <!-- Existing search section, will add Semantic Search/Q&A here -->
           <div class="section-header">
             <div class="icon-title">
               <mat-icon>search</mat-icon>
@@ -149,6 +182,81 @@ interface ExtensionGroup {
                            [isRecursive]="isRecursive" 
                            [filesExts]="filesExts">
           </app-search-files>
+          
+          <!-- Semantic Search & Q&A Section -->
+          <div class="semantic-qa-section">
+            <div class="section-header">
+                <div class="icon-title">
+                  <mat-icon>travel_explore</mat-icon> <!-- New icon for semantic features -->
+                  <div>
+                    <h2>Semantic Document Search & Q&A</h2>
+                    <p>Ask questions or find similar content across your documents.</p>
+                  </div>
+                </div>
+            </div>
+
+            <mat-form-field appearance="outline" class="search-query-field">
+              <mat-label>Enter Search Query or Question</mat-label>
+              <textarea matInput [(ngModel)]="searchQueryText" rows="3" placeholder="Type your semantic query or question here..."></textarea>
+            </mat-form-field>
+
+            <div class="search-controls">
+              <mat-form-field appearance="outline" class="top-n-field">
+                <mat-label>Top N Results</mat-label>
+                <input matInput type="number" [(ngModel)]="searchTopN" min="1" max="20">
+              </mat-form-field>
+
+              <mat-form-field appearance="outline" class="file-filter-field">
+                <mat-label>Filter by File Paths (Optional)</mat-label>
+                <input matInput [(ngModel)]="searchFilePathsInput" placeholder="e.g., path/to/file1.txt, another/doc.pdf">
+                <mat-hint>Comma-separated relative paths.</mat-hint>
+              </mat-form-field>
+            </div>
+
+            <div class="search-buttons">
+              <button mat-stroked-button color="primary" (click)="performSemanticSearch()" [disabled]="isLoadingSearch" class="action-button">
+                <mat-icon>search</mat-icon> Semantic Search
+              </button>
+              <button mat-stroked-button color="accent" (click)="performQuestionAnswering()" [disabled]="isLoadingSearch" class="action-button">
+                <mat-icon>question_answer</mat-icon> Get Answer (Q&A)
+              </button>
+            </div>
+            
+            <div *ngIf="isLoadingSearch" class="loading-indicator">
+              <mat-progress-spinner mode="indeterminate" diameter="30"></mat-progress-spinner>
+              <span>Processing your query...</span>
+            </div>
+
+            <div *ngIf="searchError" class="error-message search-error-message">
+              <mat-icon>error</mat-icon> {{searchError}}
+            </div>
+
+            <!-- Semantic Search Results Display -->
+            <div *ngIf="searchResults && searchResults.length > 0" class="results-area semantic-results-area">
+              <h3>Semantic Search Results:</h3>
+              <div *ngFor="let result of searchResults" class="result-item chunk-item-card">
+                <p><strong>File:</strong> {{result.file_path}} (Chunk ID: {{result.chunk_id_db}})</p>
+                <p><strong>Distance:</strong> {{result.distance?.toFixed(4)}}</p>
+                <p class="chunk-text-display"><strong>Text:</strong> {{result.chunk_text}}</p>
+              </div>
+            </div>
+
+            <!-- Q&A Result Display -->
+            <div *ngIf="qaAnswer" class="results-area qa-results-area">
+              <h3>Answer:</h3>
+              <p class="qa-answer-text">{{qaAnswer.answer}}</p>
+              <div *ngIf="qaAnswer.source_chunks && qaAnswer.source_chunks.length > 0" class="source-chunks-area">
+                <h4>Source Chunks:</h4>
+                <div *ngFor="let chunk of qaAnswer.source_chunks" class="result-item chunk-item-card">
+                  <p><strong>File:</strong> {{chunk.file_path}} (Chunk ID: {{chunk.chunk_id_db}})</p>
+                  <p><strong>Distance:</strong> {{chunk.distance?.toFixed(4)}}</p>
+                  <p class="chunk-text-display"><strong>Text:</strong> {{chunk.chunk_text}}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <!-- End Semantic Search & Q&A Section -->
+
 
           <div class="trees-container" *ngIf="srcPaths">
             <div class="structure-panel">
@@ -190,7 +298,45 @@ interface ExtensionGroup {
         </div>
       </div>
 
-      <!-- Removed Results Section -->
+      <!-- New Section to Display File Details with Analysis -->
+      <div class="file-details-section" *ngIf="original_files && original_files.items && original_files.items.length > 0">
+        <div class="section-header">
+          <div class="icon-title">
+            <mat-icon>insights</mat-icon> <!-- Changed icon -->
+            <div>
+              <h2>File Analysis Details</h2>
+              <p>Detailed summary and topic analysis for processed files</p>
+            </div>
+          </div>
+        </div>
+        <div *ngFor="let file of original_files.items" class="file-item-card">
+          <h4>{{ file.file_path }}</h4> <!-- Assuming file_path is relative as returned by backend for display -->
+          <p><strong>Summary:</strong> {{ file.summary || 'N/A' }}</p>
+          
+          <div *ngIf="file.research_topic" class="analysis-subsection">
+            <h5>Research Topic Analysis</h5>
+            <p><strong>Analyzed for Topic:</strong> {{ file.research_topic }}</p>
+            <p><strong>Analysis Scope:</strong> {{ file.analysis_type || 'N/A' }}</p>
+            <p><strong>Relevant to Topic:</strong> 
+              <span [ngClass]="{'relevant': file.is_topic_relevant, 'not-relevant': !file.is_topic_relevant && file.is_topic_relevant !== null}">
+                {{ file.is_topic_relevant === null || file.is_topic_relevant === undefined ? 'N/A' : (file.is_topic_relevant ? 'Yes' : 'No') }}
+              </span>
+            </p>
+            
+            <div *ngIf="file.sub_topics && file.sub_topics.length > 0">
+              <strong>Key Sub-topics:</strong>
+              <ul>
+                <li *ngFor="let sub_topic of file.sub_topics">{{ sub_topic }}</li>
+              </ul>
+            </div>
+            <p *ngIf="!file.sub_topics || file.sub_topics.length === 0"><strong>Key Sub-topics:</strong> N/A</p>
+            
+            <p><strong>Connections to Broader Themes:</strong> {{ file.topic_connections || 'N/A' }}</p>
+          </div>
+          <mat-divider *ngIf="!$last"></mat-divider>
+        </div>
+      </div>
+      <!-- End File Details Section -->
     </div>
   `,
   styles: [`
@@ -208,6 +354,211 @@ interface ExtensionGroup {
       padding: 2rem;
       animation: fadeIn 0.5s ease;
     }
+
+    .deep-analysis-section {
+      background-color: rgba(var(--primary-rgb), 0.03); 
+      padding: 1.5rem;
+      border-radius: var(--radius-md, 8px); 
+      margin-bottom: 2rem;
+      border: 1px solid rgba(var(--primary-rgb), 0.1);
+    }
+
+    .deep-analysis-mode-check {
+      margin-bottom: 1rem; 
+    }
+
+    .deep-analysis-options {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem; 
+      padding-left: 1rem; 
+      border-left: 2px solid rgba(var(--primary-rgb), 0.2); 
+      margin-top: 1rem;
+    }
+
+    .deep-analysis-options mat-form-field,
+    .deep-analysis-options mat-checkbox {
+      width: 100%;
+    }
+    
+    .research-topic-field input {
+       color: var(--text-primary); 
+    }
+
+    .file-details-section {
+      margin-top: 2rem;
+      background: var(--surface);
+      border-radius: var(--radius-lg);
+      padding: 2rem;
+      border: 1px solid var(--border);
+    }
+
+    .file-item-card {
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      background-color: rgba(var(--background-rgb), 0.5); 
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(var(--border-rgb, var(--primary-rgb)), 0.1); 
+      box-shadow: var(--shadow-sm, 0 1px 3px rgba(0,0,0,0.05)); 
+    }
+
+    .file-item-card h4 {
+      color: var(--primary);
+      margin-top: 0;
+      margin-bottom: 1rem;
+      font-size: 1.1rem;
+      font-weight: 500;
+      word-break: break-all; 
+    }
+
+    .file-item-card p {
+      margin-bottom: 0.5rem;
+      font-size: 0.9rem;
+      line-height: 1.6;
+    }
+    
+    .analysis-subsection {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px dashed rgba(var(--primary-rgb), 0.2);
+    }
+
+    .analysis-subsection h5 {
+      font-size: 1rem;
+      font-weight: 500;
+      color: var(--primary);
+      margin-bottom: 0.75rem;
+    }
+
+    .analysis-subsection ul {
+      padding-left: 1.5rem;
+      margin-top: 0.5rem;
+    }
+    .analysis-subsection li {
+      margin-bottom: 0.25rem;
+    }
+
+    .relevant {
+      color: #4CAF50; /* Green for Yes */
+      font-weight: bold;
+    }
+    .not-relevant {
+      color: #F44336; /* Red for No */
+      font-weight: bold;
+    }
+    
+    /* Semantic Search & Q&A Styles */
+    .semantic-qa-section {
+      margin-top: 2.5rem; /* Space above this new section */
+      padding: 1.5rem;
+      background-color: rgba(var(--primary-rgb), 0.02); /* Very subtle background */
+      border-radius: var(--radius-md);
+      border: 1px solid rgba(var(--primary-rgb), 0.08);
+    }
+
+    .search-query-field {
+      width: 100%;
+      margin-bottom: 1rem;
+    }
+    .search-query-field textarea {
+       color: var(--text-primary);
+    }
+
+
+    .search-controls {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1rem;
+      align-items: flex-start; /* Align items to the top */
+    }
+
+    .top-n-field {
+      width: 120px; /* Smaller width for Top N */
+    }
+    .top-n-field input {
+       color: var(--text-primary);
+    }
+
+
+    .file-filter-field {
+      flex-grow: 1; /* Allow file filter to take remaining space */
+    }
+    .file-filter-field input {
+       color: var(--text-primary);
+    }
+
+    .search-buttons {
+      display: flex;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    
+    .action-button mat-icon {
+        margin-right: 8px; /* Space between icon and text */
+    }
+
+    .loading-indicator {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin: 1rem 0;
+      color: var(--text-secondary);
+    }
+    
+    .search-error-message {
+        margin-top: 1rem; /* Ensure spacing from buttons */
+    }
+
+    .results-area {
+      margin-top: 1.5rem;
+    }
+    
+    .results-area h3 {
+        font-size: 1.2rem;
+        color: var(--primary);
+        margin-bottom: 1rem;
+    }
+    .results-area h4 {
+        font-size: 1rem;
+        color: var(--text-secondary);
+        margin-top: 1rem;
+        margin-bottom: 0.5rem;
+    }
+
+    .chunk-item-card {
+      padding: 1rem;
+      margin-bottom: 1rem;
+      background-color: var(--surface-variant);
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+    }
+    .chunk-item-card p {
+        margin-bottom: 0.3rem;
+        font-size: 0.85rem;
+    }
+    .chunk-text-display {
+        white-space: pre-wrap; /* Preserve whitespace and wrap text */
+        background-color: rgba(var(--background-rgb), 0.7);
+        padding: 0.5rem;
+        border-radius: var(--radius-sm);
+        max-height: 150px; /* Limit height of chunk display */
+        overflow-y: auto; /* Allow scrolling for long chunks */
+    }
+    
+    .qa-answer-text {
+        font-size: 1rem;
+        line-height: 1.7;
+        padding: 1rem;
+        background-color: var(--surface-variant);
+        border-radius: var(--radius-md);
+        white-space: pre-wrap; /* To respect newlines in the answer */
+    }
+    .source-chunks-area {
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid var(--border);
+    }
+
 
     @keyframes fadeIn {
       from {
@@ -796,11 +1147,15 @@ interface ExtensionGroup {
       --surface: #f9f9f9;
       --surface-variant: #f5f5f5;
       --primary: #00BFA5;
+      --primary-rgb: 0, 191, 165; /* Added for rgba usage */
       --text-primary: #333333;
       --text-secondary: #666666;
       --border: #e0e0e0;
+      --border-rgb: 224, 224, 224; /* Added for rgba border */
       --radius-lg: 12px;
       --radius-sm: 4px;
+      --radius-md: 8px; /* Added for consistency */
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.04); /* Added for cards */
       --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.05);
       --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.1);
       --hover: #f0f0f0;
@@ -812,9 +1167,11 @@ interface ExtensionGroup {
       --surface: #444444;
       --surface-variant: #555555;
       --primary: #00BFA5;
+      --primary-rgb: 0, 191, 165; /* Added for rgba usage */
       --text-primary: #ffffff;
       --text-secondary: #cccccc;
       --border: #666666;
+      --border-rgb: 102, 102, 102; /* Added for rgba border */
     }
 
     @media (max-width: 1024px) {
@@ -919,7 +1276,7 @@ export class AppComponent {
     }
   ];
 
-  original_files: any;
+  original_files: any; // This will hold the full response, including analysis data
   srcPaths: any;
   dstPaths: any;
   rootPath: string = "";
@@ -933,6 +1290,25 @@ export class AppComponent {
   ollamaApiBaseUrl: string = 'http://localhost:11434/v1';
   llmProviders = [{value: 'openai', viewValue: 'OpenAI/Groq API'}, {value: 'ollama', viewValue: 'Ollama (Local)'}];
   customSummarizationPrompt: string = '';
+
+  // Deep Analysis Mode Variables
+  deepAnalysisModeEnabled: boolean = false;
+  researchTopicPrompt: string = '';
+  quickTopicAnalysisEnabled: boolean = false;
+  fullDocTopicAnalysisEnabled: boolean = false;
+  semanticSearchEnabled: boolean = false;
+
+  // Semantic Search & Q&A UI State
+  searchQueryText: string = '';
+  searchTopN: number = 3; // Default top_n value
+  searchFilePathsInput: string = ''; // Comma-separated string for file paths
+  
+  searchResults: any[] = [];
+  qaAnswer: { answer: string, source_chunks: any[] } | null = null; // To store Q&A response
+
+  isLoadingSearch: boolean = false;
+  searchError: string | null = null;
+
 
   constructor(private dataService: DataService) {
     // Check for saved theme preference
@@ -985,6 +1361,7 @@ export class AppComponent {
   getFiles(): void {
     this.srcPaths = null;
     this.dstPaths = null;
+    this.original_files = null; // Clear previous results
     this.isLoading = true;
     let params = new HttpParams();
     params = params.set("root_path", this.rootPath);
@@ -997,17 +1374,72 @@ export class AppComponent {
     if (this.customSummarizationPrompt && this.customSummarizationPrompt.trim() !== '') {
       params = params.set("custom_summarization_prompt", this.customSummarizationPrompt);
     }
+
+    // Add Deep Analysis parameters if enabled
+    if (this.deepAnalysisModeEnabled) {
+      if (this.researchTopicPrompt && this.researchTopicPrompt.trim() !== '') {
+        params = params.set("research_topic_prompt", this.researchTopicPrompt);
+        params = params.set("quick_topic_analysis_enabled", this.quickTopicAnalysisEnabled.toString());
+        params = params.set("full_doc_topic_analysis_enabled", this.fullDocTopicAnalysisEnabled.toString());
+      } else {
+        params = params.set("quick_topic_analysis_enabled", "false");
+        params = params.set("full_doc_topic_analysis_enabled", "false");
+      }
+      params = params.set("semantic_search_enabled", this.semanticSearchEnabled.toString());
+    }
+
     this.dataService.getFormattedFiles(params).subscribe((data) => {
-      this.original_files = data;
-      this.original_files.items = this.original_files.items.map((item: any) => ({ src_path: item.src_path.replaceAll("\\\\", "/").replaceAll("\\", "/"), dst_path: item.dst_path }));
-      let res = this.original_files.items.map((item: any) => ({ src_path: `${data.root_path}/${item.src_path}`, dst_path: `${data.root_path}/${item.dst_path}` }))
+      let processedItems = data; 
+
+      if (processedItems && Array.isArray(processedItems)) {
+        processedItems = processedItems.map((file: any) => {
+          let parsedSubTopics = file.sub_topics;
+          if (parsedSubTopics && typeof parsedSubTopics === 'string') {
+            try {
+              parsedSubTopics = JSON.parse(parsedSubTopics);
+            } catch (e) {
+              console.error('Error parsing sub_topics for file:', file.file_path, e);
+            }
+          }
+          if (!Array.isArray(parsedSubTopics)) {
+            parsedSubTopics = parsedSubTopics ? [String(parsedSubTopics)] : [];
+          }
+          return {
+            ...file,
+            file_path: file.file_path.replaceAll("\\\\", "/").replaceAll("\\", "/"), 
+            sub_topics: parsedSubTopics, 
+            dst_path: file.dst_path ? file.dst_path.replaceAll("\\\\", "/").replaceAll("\\", "/") : null
+          };
+        });
+      } else {
+        processedItems = []; 
+      }
+      
+      this.original_files = { items: processedItems, root_path: this.rootPath }; 
+
+      let res = processedItems.map((item: any) => ({ 
+        src_path: `${this.rootPath}/${item.file_path}`, 
+        dst_path: item.dst_path ? `${this.rootPath}/${item.dst_path}` : null
+      }));
       this.srcPaths = res.map((r: any) => r.src_path);
-      this.dstPaths = res.map((r: any) => r.dst_path);
+      this.dstPaths = res.filter((r:any) => r.dst_path !== null).map((r: any) => r.dst_path);
+      
       this.isLoading = false;
-    })
+    }, (error) => {
+      console.error('Error fetching files:', error);
+      this.errorMessage = 'Error fetching file data. Please check console for details.';
+      this.isLoading = false;
+      this.original_files = { items: [], root_path: this.rootPath }; 
+    });
   }
 
   updateStructure(): void {
+    if (!this.original_files || !this.original_files.items_for_update_structure) { 
+        console.error("Data for updateStructure is not available in the expected format.");
+        this.errorMessage = "Cannot update structure: required data is missing.";
+        return;
+    }
+    
     this.dataService.updateStructure(this.original_files).subscribe(data => {
       this.successMessage = 'Files re-structured successfully.';
     },
@@ -1018,20 +1450,104 @@ export class AppComponent {
   }
 
   onNotify(value: any): void {
-    const index = 1 - value.index; // call the other tree: 0 -> 1, 1 -> 0
-    const path = value.path; // get dst ot src path
+    const index = 1 - value.index; 
+    const path = value.path; 
     const root_path = this.original_files.root_path;
     let matchingFilePath = "";
-    if (value.index === 0)
-      matchingFilePath = root_path + "/" + this.original_files.items.find((file: any) => root_path + "/" + file.src_path === path)?.dst_path;
-    else
-      matchingFilePath = root_path + "/" + this.original_files.items.find((file: any) => root_path + "/" + file.dst_path === path)?.src_path;
-    this.childComponents.toArray()[index].highlightFile(matchingFilePath);
+    // Ensure items exist before trying to find
+    const itemsForSearch = this.original_files && this.original_files.items ? this.original_files.items : [];
+
+    if (value.index === 0) { // Current structure tree clicked
+      const foundItem = itemsForSearch.find((file: any) => root_path + "/" + file.src_path === path);
+      if (foundItem && foundItem.dst_path) { // Check if dst_path exists
+        matchingFilePath = root_path + "/" + foundItem.dst_path;
+      }
+    } else { // Optimized structure tree clicked
+      const foundItem = itemsForSearch.find((file: any) => file.dst_path && root_path + "/" + file.dst_path === path);
+      if (foundItem) { // src_path should always exist
+        matchingFilePath = root_path + "/" + foundItem.src_path;
+      }
+    }
+    if(matchingFilePath){ // Only highlight if a match was found
+        this.childComponents.toArray()[index].highlightFile(matchingFilePath);
+    } else {
+        console.warn("No matching file path found for highlighting in the other tree for path:", path);
+    }
   }
 
   toggleTheme() {
     this.isDarkTheme = !this.isDarkTheme;
     document.documentElement.setAttribute('data-theme', this.isDarkTheme ? 'dark' : 'light');
     localStorage.setItem('theme', this.isDarkTheme ? 'dark' : 'light');
+  }
+
+  // Helper method to parse comma-separated file paths input
+  private parseFilePaths(): string[] | undefined {
+    if (this.searchFilePathsInput && this.searchFilePathsInput.trim() !== '') {
+      return this.searchFilePathsInput.split(',').map(fp => fp.trim()).filter(fp => fp !== '');
+    }
+    return undefined;
+  }
+
+  performSemanticSearch(): void {
+    if (!this.searchQueryText.trim()) {
+      this.searchError = "Please enter a search query.";
+      this.searchResults = [];
+      this.qaAnswer = null;
+      return;
+    }
+    this.isLoadingSearch = true;
+    this.searchError = null;
+    this.searchResults = [];
+    this.qaAnswer = null;
+    
+    const filePaths = this.parseFilePaths();
+
+    this.dataService.semanticSearch(this.searchQueryText, this.searchTopN, filePaths)
+      .subscribe({
+        next: (results) => {
+          this.searchResults = results;
+          this.isLoadingSearch = false;
+          if (results.length === 0) {
+            this.searchError = "No relevant chunks found for your query.";
+          }
+        },
+        error: (err) => {
+          console.error('Error during semantic search:', err);
+          this.searchError = err.error?.detail || err.message || 'Failed to perform semantic search.';
+          this.isLoadingSearch = false;
+        }
+      });
+  }
+
+  performQuestionAnswering(): void {
+    if (!this.searchQueryText.trim()) {
+      this.searchError = "Please enter a question.";
+      this.searchResults = [];
+      this.qaAnswer = null;
+      return;
+    }
+    this.isLoadingSearch = true;
+    this.searchError = null;
+    this.searchResults = [];
+    this.qaAnswer = null;
+
+    const filePaths = this.parseFilePaths();
+
+    this.dataService.answerQuestion(this.searchQueryText, this.searchTopN, filePaths) // Using searchTopN for top_n_chunks for Q&A
+      .subscribe({
+        next: (response) => {
+          this.qaAnswer = response; // Expects { answer: string, source_chunks: any[] }
+          this.isLoadingSearch = false;
+          if (!response.answer || response.answer.trim() === "Could not find relevant documents to answer the question." || response.answer.trim() === "The language model did not provide an answer based on the context."){
+             // this.searchError = response.answer; // Display "no answer" message in results, not as error
+          }
+        },
+        error: (err) => {
+          console.error('Error during question answering:', err);
+          this.searchError = err.error?.detail || err.message || 'Failed to get an answer.';
+          this.isLoadingSearch = false;
+        }
+      });
   }
 }

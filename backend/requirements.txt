@@ -9,3 +9,5 @@ pydub
 docx2txt
 nbconvert
 openpyxl  # for Excel file support
+sentence-transformers>=2.2.0
+chromadb>=0.4.22
