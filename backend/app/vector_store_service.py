@@ -279,5 +279,3 @@ if __name__ == '__main__': # pragma: no cover
         logger.info(f"Collection count after re-adding doc2: {vector_store_service.collection.count()}")
         vector_store_service.add_chunk_embeddings(test_file_path_2, [])
         logger.info(f"Collection count after adding empty chunks for doc2: {vector_store_service.collection.count()}")
-
-```
