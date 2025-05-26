@@ -1,6 +1,6 @@
 fastapi
 uvicorn[standard]==0.22.0
-sse-starlette==1.8.0
+sse-starlette==1.8.2
 openai
 pydantic-settings
 llama-index
