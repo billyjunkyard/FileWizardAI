@@ -333,7 +333,7 @@ interface ExtensionGroup {
             
             <p><strong>Connections to Broader Themes:</strong> {{ file.topic_connections || 'N/A' }}</p>
           </div>
-          <mat-divider *ngIf="!$last"></mat-divider>
+          <mat-divider *ngIf="!last"></mat-divider>
         </div>
       </div>
       <!-- End File Details Section -->
