@@ -1352,7 +1352,7 @@ export class AppComponent {
   }
 
   onPathChange(value: string) {
-    this.rootPath = value.replaceAll("\\", "/").replaceAll("\", "/");
+    this.rootPath = value.replaceAll("\\\\", "/");
   }
 
   onLlmProviderChange() {
@@ -1493,9 +1493,9 @@ export class AppComponent {
               }
               return {
                 ...file,
-                file_path: file.file_path.replaceAll("\\", "/").replaceAll("\", "/"),
+                file_path: file.file_path.replaceAll("\\\\", "/"),
                 sub_topics: parsedSubTopics,
-                dst_path: file.dst_path ? file.dst_path.replaceAll("\\", "/").replaceAll("\", "/") : null
+                dst_path: file.dst_path ? file.dst_path.replaceAll("\\\\", "/") : null
               };
             });
           } else {
