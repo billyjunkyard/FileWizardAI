@@ -325,7 +325,7 @@ interface ExtensionGroup {
             </div>
           </div>
         </div>
-        <div *ngFor="let file of original_files.items" class="file-item-card">
+        <div *ngFor="let file of original_files.items; let last = last" class="file-item-card">
           <h4>{{ file.file_path }}</h4> 
           <p><strong>Summary:</strong> {{ file.summary || 'N/A' }}</p>
           
