@@ -62,7 +62,7 @@ interface ExtensionGroup {
           <div class="llm-config-section">
             <mat-form-field appearance="outline" class="llm-provider-field">
               <mat-label>LLM Provider</mat-label>
-              <mat-select [(ngModel)]="selectedLLMProvider">
+              <mat-select [(ngModel)]="selectedLLMProvider" (selectionChange)="onLlmProviderChange()">
                 <mat-option *ngFor="let provider of llmProviders" [value]="provider.value">
                   {{provider.viewValue}}
                 </mat-option>
@@ -71,8 +71,29 @@ interface ExtensionGroup {
 
             <mat-form-field appearance="outline" class="ollama-url-field" *ngIf="selectedLLMProvider === 'ollama'">
               <mat-label>Ollama API Base URL</mat-label>
-              <input matInput [(ngModel)]="ollamaApiBaseUrl" placeholder="e.g., http://localhost:11434/v1">
+              <input matInput [(ngModel)]="ollamaApiBaseUrl" 
+                     (ngModelChange)="checkOllamaUrlAndFetchModels()"
+                     placeholder="e.g., http://localhost:11434">
+              <mat-icon matSuffix *ngIf="ollamaApiUrlStatus === 'loading'">hourglass_empty</mat-icon>
+              <mat-icon matSuffix *ngIf="ollamaApiUrlStatus === 'success'" style="color: green;">check_circle</mat-icon>
+              <mat-icon matSuffix *ngIf="ollamaApiUrlStatus === 'error'" style="color: red;" [matTooltip]="ollamaApiErrorMsg || 'Error connecting to Ollama'">error</mat-icon>
             </mat-form-field>
+            <div *ngIf="selectedLLMProvider === 'ollama' && ollamaApiUrlStatus === 'error' && ollamaApiErrorMsg" class="ollama-error-message">
+              {{ ollamaApiErrorMsg }}
+            </div>
+
+            <mat-form-field appearance="outline" class="ollama-model-select-field" *ngIf="selectedLLMProvider === 'ollama' && ollamaApiUrlStatus === 'success' && ollamaModels.length > 0">
+              <mat-label>Ollama Text Model</mat-label>
+              <mat-select [(ngModel)]="selectedOllamaTextModel">
+                <mat-option *ngFor="let model of ollamaModels" [value]="model">
+                  {{ model }}
+                </mat-option>
+              </mat-select>
+            </mat-form-field>
+            <div *ngIf="selectedLLMProvider === 'ollama' && ollamaApiUrlStatus === 'success' && ollamaModels.length === 0" class="ollama-no-models-message">
+              No Ollama models found at the specified address. Please check your Ollama setup.
+            </div>
+
 
             <mat-form-field appearance="outline" class="custom-prompt-field">
               <mat-label>Custom Summarization Prompt (Optional)</mat-label>
@@ -167,7 +188,7 @@ interface ExtensionGroup {
           </div>
         </div>
 
-        <div class="search-section"> <!-- Existing search section, will add Semantic Search/Q&A here -->
+        <div class="search-section"> 
           <div class="section-header">
             <div class="icon-title">
               <mat-icon>search</mat-icon>
@@ -183,11 +204,10 @@ interface ExtensionGroup {
                            [filesExts]="filesExts">
           </app-search-files>
           
-          <!-- Semantic Search & Q&A Section -->
           <div class="semantic-qa-section">
             <div class="section-header">
                 <div class="icon-title">
-                  <mat-icon>travel_explore</mat-icon> <!-- New icon for semantic features -->
+                  <mat-icon>travel_explore</mat-icon> 
                   <div>
                     <h2>Semantic Document Search & Q&A</h2>
                     <p>Ask questions or find similar content across your documents.</p>
@@ -231,7 +251,6 @@ interface ExtensionGroup {
               <mat-icon>error</mat-icon> {{searchError}}
             </div>
 
-            <!-- Semantic Search Results Display -->
             <div *ngIf="searchResults && searchResults.length > 0" class="results-area semantic-results-area">
               <h3>Semantic Search Results:</h3>
               <div *ngFor="let result of searchResults" class="result-item chunk-item-card">
@@ -241,7 +260,6 @@ interface ExtensionGroup {
               </div>
             </div>
 
-            <!-- Q&A Result Display -->
             <div *ngIf="qaAnswer" class="results-area qa-results-area">
               <h3>Answer:</h3>
               <p class="qa-answer-text">{{qaAnswer.answer}}</p>
@@ -255,7 +273,6 @@ interface ExtensionGroup {
               </div>
             </div>
           </div>
-          <!-- End Semantic Search & Q&A Section -->
 
 
           <div class="trees-container" *ngIf="srcPaths">
@@ -298,11 +315,10 @@ interface ExtensionGroup {
         </div>
       </div>
 
-      <!-- New Section to Display File Details with Analysis -->
       <div class="file-details-section" *ngIf="original_files && original_files.items && original_files.items.length > 0">
         <div class="section-header">
           <div class="icon-title">
-            <mat-icon>insights</mat-icon> <!-- Changed icon -->
+            <mat-icon>insights</mat-icon> 
             <div>
               <h2>File Analysis Details</h2>
               <p>Detailed summary and topic analysis for processed files</p>
@@ -310,7 +326,7 @@ interface ExtensionGroup {
           </div>
         </div>
         <div *ngFor="let file of original_files.items" class="file-item-card">
-          <h4>{{ file.file_path }}</h4> <!-- Assuming file_path is relative as returned by backend for display -->
+          <h4>{{ file.file_path }}</h4> 
           <p><strong>Summary:</strong> {{ file.summary || 'N/A' }}</p>
           
           <div *ngIf="file.research_topic" class="analysis-subsection">
@@ -333,10 +349,9 @@ interface ExtensionGroup {
             
             <p><strong>Connections to Broader Themes:</strong> {{ file.topic_connections || 'N/A' }}</p>
           </div>
-          <mat-divider *ngIf="!$last"></mat-divider>
+          <mat-divider *ngIf="!last"></mat-divider>
         </div>
       </div>
-      <!-- End File Details Section -->
     </div>
   `,
   styles: [`
@@ -354,6 +369,31 @@ interface ExtensionGroup {
       padding: 2rem;
       animation: fadeIn 0.5s ease;
     }
+
+    .ollama-url-field .mat-icon { 
+      cursor: default; 
+    }
+    .ollama-error-message {
+      color: red; 
+      font-size: 0.75em; 
+      margin-top: -0.85em; 
+      margin-left: 0.5em; 
+      margin-bottom: 0.5em;
+    }
+    .ollama-model-select-field {
+      width: 100%;
+      margin-bottom: 1rem; 
+    }
+    .ollama-no-models-message {
+      font-size: 0.8em;
+      color: var(--text-secondary); 
+      margin-top: -0.75em;
+      margin-bottom: 0.5em;
+      padding: 0.5em;
+      background-color: rgba(var(--primary-rgb), 0.05); 
+      border-radius: 4px;
+    }
+
 
     .deep-analysis-section {
       background-color: rgba(var(--primary-rgb), 0.03); 
@@ -798,9 +838,9 @@ interface ExtensionGroup {
       margin-bottom: 2rem;
     }
 
-    .root-path-field, .llm-provider-field, .ollama-url-field, .custom-prompt-field {
+    .root-path-field, .llm-provider-field, .ollama-url-field, .ollama-model-select-field, .custom-prompt-field {
       width: 100%;
-      margin-bottom: 1rem; /* Add some spacing between fields */
+      margin-bottom: 1rem; 
       color: var(--text-primary);
     }
 
@@ -1147,15 +1187,15 @@ interface ExtensionGroup {
       --surface: #f9f9f9;
       --surface-variant: #f5f5f5;
       --primary: #00BFA5;
-      --primary-rgb: 0, 191, 165; /* Added for rgba usage */
+      --primary-rgb: 0, 191, 165; 
       --text-primary: #333333;
       --text-secondary: #666666;
       --border: #e0e0e0;
-      --border-rgb: 224, 224, 224; /* Added for rgba border */
+      --border-rgb: 224, 224, 224; 
       --radius-lg: 12px;
       --radius-sm: 4px;
-      --radius-md: 8px; /* Added for consistency */
-      --shadow-sm: 0 1px 2px rgba(0,0,0,0.04); /* Added for cards */
+      --radius-md: 8px; 
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.04); 
       --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.05);
       --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.1);
       --hover: #f0f0f0;
@@ -1167,11 +1207,11 @@ interface ExtensionGroup {
       --surface: #444444;
       --surface-variant: #555555;
       --primary: #00BFA5;
-      --primary-rgb: 0, 191, 165; /* Added for rgba usage */
+      --primary-rgb: 0, 191, 165; 
       --text-primary: #ffffff;
       --text-secondary: #cccccc;
       --border: #666666;
-      --border-rgb: 102, 102, 102; /* Added for rgba border */
+      --border-rgb: 102, 102, 102; 
     }
 
     @media (max-width: 1024px) {
@@ -1218,65 +1258,16 @@ export class AppComponent {
   @ViewChildren(FolderTreeComponent) childComponents!: QueryList<FolderTreeComponent>;
 
   extensionGroups: ExtensionGroup[] = [
-    {
-      name: 'Documents',
-      icon: 'description',
-      extensions: ['.pdf', '.doc', '.docx', '.txt', '.md'],
-      selected: 0,
-      total: 5,
-      expanded: false
-    },
-    {
-      name: 'Images',
-      icon: 'image',
-      extensions: ['.jpg', '.jpeg', '.png', '.gif', '.svg'],
-      selected: 0,
-      total: 5,
-      expanded: false
-    },
-    {
-      name: 'Audio',
-      icon: 'audiotrack',
-      extensions: ['.mp3', '.wav', '.ogg', '.m4a', '.flac'],
-      selected: 0,
-      total: 5,
-      expanded: false
-    },
-    {
-      name: 'Video',
-      icon: 'movie',
-      extensions: ['.mp4', '.avi', '.mkv', '.mov', '.wmv'],
-      selected: 0,
-      total: 5,
-      expanded: false
-    },
-    {
-      name: 'Archives',
-      icon: 'folder_zip',
-      extensions: ['.zip', '.rar', '.7z', '.tar', '.gz'],
-      selected: 0,
-      total: 5,
-      expanded: false
-    },
-    {
-      name: 'Code',
-      icon: 'code',
-      extensions: ['.js', '.ts', '.py', '.java', '.html', '.css', '.json', '.php', '.cpp'],
-      selected: 0,
-      total: 9,
-      expanded: false
-    },
-    {
-      name: 'Data',
-      icon: 'storage',
-      extensions: ['.csv', '.xlsx', '.xml', '.sql', '.db', '.json'],
-      selected: 0,
-      total: 6,
-      expanded: false
-    }
+    { name: 'Documents', icon: 'description', extensions: ['.pdf', '.doc', '.docx', '.txt', '.md'], selected: 0, total: 5, expanded: false },
+    { name: 'Images', icon: 'image', extensions: ['.jpg', '.jpeg', '.png', '.gif', '.svg'], selected: 0, total: 5, expanded: false },
+    { name: 'Audio', icon: 'audiotrack', extensions: ['.mp3', '.wav', '.ogg', '.m4a', '.flac'], selected: 0, total: 5, expanded: false },
+    { name: 'Video', icon: 'movie', extensions: ['.mp4', '.avi', '.mkv', '.mov', '.wmv'], selected: 0, total: 5, expanded: false },
+    { name: 'Archives', icon: 'folder_zip', extensions: ['.zip', '.rar', '.7z', '.tar', '.gz'], selected: 0, total: 5, expanded: false },
+    { name: 'Code', icon: 'code', extensions: ['.js', '.ts', '.py', '.java', '.html', '.css', '.json', '.php', '.cpp'], selected: 0, total: 9, expanded: false },
+    { name: 'Data', icon: 'storage', extensions: ['.csv', '.xlsx', '.xml', '.sql', '.db', '.json'], selected: 0, total: 6, expanded: false }
   ];
 
-  original_files: any; // This will hold the full response, including analysis data
+  original_files: any; 
   srcPaths: any;
   dstPaths: any;
   rootPath: string = "";
@@ -1286,32 +1277,38 @@ export class AppComponent {
   isLoading: boolean = false;
   filesExts: string[] = [];
   isDarkTheme = false;
-  selectedLLMProvider: string = 'openai';
-  ollamaApiBaseUrl: string = 'http://localhost:11434/v1';
-  llmProviders = [{value: 'openai', viewValue: 'OpenAI/Groq API'}, {value: 'ollama', viewValue: 'Ollama (Local)'}];
+  
+  selectedLLMProvider: string = 'openai'; 
+  ollamaApiBaseUrl: string = 'http://localhost:11434'; 
+  llmProviders = [
+    {value: 'openai', viewValue: 'OpenAI/Groq API'}, 
+    {value: 'ollama', viewValue: 'Ollama (Local)'}
+  ];
   customSummarizationPrompt: string = '';
 
-  // Deep Analysis Mode Variables
+  // Ollama specific properties
+  ollamaApiUrlStatus: 'none' | 'loading' | 'success' | 'error' = 'none';
+  ollamaApiErrorMsg: string | null = null;
+  ollamaModels: string[] = [];
+  selectedOllamaTextModel: string = ''; 
+
   deepAnalysisModeEnabled: boolean = false;
   researchTopicPrompt: string = '';
   quickTopicAnalysisEnabled: boolean = false;
   fullDocTopicAnalysisEnabled: boolean = false;
   semanticSearchEnabled: boolean = false;
 
-  // Semantic Search & Q&A UI State
   searchQueryText: string = '';
-  searchTopN: number = 3; // Default top_n value
-  searchFilePathsInput: string = ''; // Comma-separated string for file paths
+  searchTopN: number = 3; 
+  searchFilePathsInput: string = ''; 
   
   searchResults: any[] = [];
-  qaAnswer: { answer: string, source_chunks: any[] } | null = null; // To store Q&A response
+  qaAnswer: { answer: string, source_chunks: any[] } | null = null; 
 
   isLoadingSearch: boolean = false;
   searchError: string | null = null;
 
-
   constructor(private dataService: DataService) {
-    // Check for saved theme preference
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme === 'dark') {
       this.isDarkTheme = true;
@@ -1355,83 +1352,195 @@ export class AppComponent {
   }
 
   onPathChange(value: string) {
-    this.rootPath = value.replaceAll("\\\\", "/").replaceAll("\\", "/")
+    this.rootPath = value.replaceAll("\\", "/").replaceAll("\", "/");
+  }
+
+  onLlmProviderChange() {
+    if (this.selectedLLMProvider === 'ollama') {
+      this.checkOllamaUrlAndFetchModels();
+    } else {
+      this.ollamaApiUrlStatus = 'none'; 
+      this.ollamaModels = [];
+      this.selectedOllamaTextModel = ''; 
+      this.ollamaApiErrorMsg = null;
+    }
+  }
+
+  checkOllamaUrlAndFetchModels() {
+    if (!this.ollamaApiBaseUrl || !this.ollamaApiBaseUrl.trim() || this.selectedLLMProvider !== 'ollama') {
+      this.ollamaApiUrlStatus = 'none';
+      this.ollamaModels = [];
+      this.selectedOllamaTextModel = '';
+      this.ollamaApiErrorMsg = null;
+      return;
+    }
+
+    this.ollamaApiUrlStatus = 'loading';
+    this.ollamaApiErrorMsg = null;
+    this.ollamaModels = []; 
+    this.selectedOllamaTextModel = '';
+
+    this.dataService.getOllamaModels(this.ollamaApiBaseUrl.trim()).subscribe({
+      next: (response) => {
+        this.ollamaApiUrlStatus = 'success';
+        this.ollamaModels = response.models || [];
+        if (this.ollamaModels.length > 0) {
+           if (!this.selectedOllamaTextModel || !this.ollamaModels.includes(this.selectedOllamaTextModel)) {
+             this.selectedOllamaTextModel = this.ollamaModels[0];
+           }
+        } else {
+          this.ollamaApiErrorMsg = 'URL is reachable, but no Ollama models found.';
+          this.selectedOllamaTextModel = ''; 
+        }
+      },
+      error: (err) => {
+        this.ollamaApiUrlStatus = 'error';
+        this.ollamaModels = [];
+        this.selectedOllamaTextModel = '';
+        if (err.error && typeof err.error.detail === 'string') {
+          this.ollamaApiErrorMsg = err.error.detail;
+        } else if (err.statusText && typeof err.statusText === 'string' && err.statusText !== 'OK') {
+          this.ollamaApiErrorMsg = `Error: ${err.status} - ${err.statusText}`;
+        } else if (typeof err.message === 'string') {
+          this.ollamaApiErrorMsg = err.message;
+        } else {
+          this.ollamaApiErrorMsg = 'Failed to connect or fetch models. Check URL and ensure Ollama is running and accessible (CORS might be an issue if Ollama is remote and not configured).';
+        }
+      }
+    });
   }
 
   getFiles(): void {
+    // Reset states
     this.srcPaths = null;
     this.dstPaths = null;
-    this.original_files = null; // Clear previous results
-    this.isLoading = true;
+    this.original_files = null;
+    this.successMessage = '';
+    this.errorMessage = '';
+    this.isLoading = true; // Set loading true at the beginning
+
     let params = new HttpParams();
     params = params.set("root_path", this.rootPath);
-    params = params.set("recursive", this.isRecursive);
+    params = params.set("recursive", this.isRecursive.toString()); // Ensure boolean is string for HttpParams
     params = params.set("required_exts", this.filesExts.join(';'));
     params = params.set("llm_provider", this.selectedLLMProvider);
+
     if (this.selectedLLMProvider === 'ollama') {
-      params = params.set("ollama_api_base_url", this.ollamaApiBaseUrl);
+      if (this.ollamaApiBaseUrl && this.ollamaApiBaseUrl.trim()) {
+        params = params.set("ollama_api_base_url", this.ollamaApiBaseUrl.trim());
+      }
+      if (this.selectedOllamaTextModel) { 
+        params = params.set("ollama_text_model_name", this.selectedOllamaTextModel);
+      }
     }
+
     if (this.customSummarizationPrompt && this.customSummarizationPrompt.trim() !== '') {
       params = params.set("custom_summarization_prompt", this.customSummarizationPrompt);
     }
 
-    // Add Deep Analysis parameters if enabled
     if (this.deepAnalysisModeEnabled) {
       if (this.researchTopicPrompt && this.researchTopicPrompt.trim() !== '') {
         params = params.set("research_topic_prompt", this.researchTopicPrompt);
         params = params.set("quick_topic_analysis_enabled", this.quickTopicAnalysisEnabled.toString());
         params = params.set("full_doc_topic_analysis_enabled", this.fullDocTopicAnalysisEnabled.toString());
       } else {
+        // Ensure these are explicitly false if no topic prompt, as per backend expectations
         params = params.set("quick_topic_analysis_enabled", "false");
         params = params.set("full_doc_topic_analysis_enabled", "false");
       }
       params = params.set("semantic_search_enabled", this.semanticSearchEnabled.toString());
+    } else {
+        // Ensure these are explicitly false if deep analysis is off
+        params = params.set("quick_topic_analysis_enabled", "false");
+        params = params.set("full_doc_topic_analysis_enabled", "false");
+        params = params.set("semantic_search_enabled", "false");
     }
+    
+    // console.log('getFiles params:', params.toString()); // For debugging
 
-    this.dataService.getFormattedFiles(params).subscribe((data) => {
-      let processedItems = data; 
+    this.dataService.getFormattedFiles(params).subscribe({
+      next: (eventData) => {
+        // console.log('SSE event received in component:', eventData); // For debugging
+        if (eventData.event === 'task_started') {
+          this.successMessage = `Task started (ID: ${eventData.data?.task_id || 'N/A'}). Waiting for progress...`;
+          this.errorMessage = ''; // Clear previous errors
+        } else if (eventData.event === 'progress') {
+          if (eventData.data && eventData.data.type === 'status') {
+              this.successMessage = eventData.data.message || 'Processing...';
+          } else if (eventData.data && eventData.data.type === 'file_processed') { // Example of a more specific progress event
+              this.successMessage = `Processed: ${eventData.data.file_path} (${eventData.data.current_file}/${eventData.data.total_files})`;
+          }
+        } else if (eventData.event === 'task_completed') {
+          this.isLoading = false;
+          this.successMessage = 'File processing completed successfully!';
+          this.errorMessage = '';
 
-      if (processedItems && Array.isArray(processedItems)) {
-        processedItems = processedItems.map((file: any) => {
-          let parsedSubTopics = file.sub_topics;
-          if (parsedSubTopics && typeof parsedSubTopics === 'string') {
-            try {
-              parsedSubTopics = JSON.parse(parsedSubTopics);
-            } catch (e) {
-              console.error('Error parsing sub_topics for file:', file.file_path, e);
-            }
+          const backendResponseData = eventData.data; 
+          let processedItems = backendResponseData.items;
+
+          if (processedItems && Array.isArray(processedItems)) {
+            processedItems = processedItems.map((file: any) => {
+              let parsedSubTopics = file.sub_topics;
+              if (parsedSubTopics && typeof parsedSubTopics === 'string') {
+                try {
+                  parsedSubTopics = JSON.parse(parsedSubTopics);
+                } catch (e) {
+                  console.error('Error parsing sub_topics for file:', file.file_path, e);
+                }
+              }
+              if (!Array.isArray(parsedSubTopics)) {
+                parsedSubTopics = parsedSubTopics ? [String(parsedSubTopics)] : [];
+              }
+              return {
+                ...file,
+                file_path: file.file_path.replaceAll("\\", "/").replaceAll("\", "/"),
+                sub_topics: parsedSubTopics,
+                dst_path: file.dst_path ? file.dst_path.replaceAll("\\", "/").replaceAll("\", "/") : null
+              };
+            });
+          } else {
+            console.warn('No items received in task_completed event or items is not an array:', backendResponseData);
+            processedItems = [];
           }
-          if (!Array.isArray(parsedSubTopics)) {
-            parsedSubTopics = parsedSubTopics ? [String(parsedSubTopics)] : [];
-          }
-          return {
-            ...file,
-            file_path: file.file_path.replaceAll("\\\\", "/").replaceAll("\\", "/"), 
-            sub_topics: parsedSubTopics, 
-            dst_path: file.dst_path ? file.dst_path.replaceAll("\\\\", "/").replaceAll("\\", "/") : null
-          };
-        });
-      } else {
-        processedItems = []; 
+          
+          this.original_files = { items: processedItems, root_path: this.rootPath };
+
+          const res = processedItems.map((item: any) => ({
+            src_path: `${this.rootPath}/${item.file_path}`, 
+            dst_path: item.dst_path ? `${this.rootPath}/${item.dst_path}` : null
+          }));
+          this.srcPaths = res.map((r: any) => r.src_path);
+          this.dstPaths = res.filter((r: any) => r.dst_path !== null).map((r: any) => r.dst_path);
+
+        } else if (eventData.event === 'task_error') {
+          this.isLoading = false;
+          this.errorMessage = eventData.data?.error || 'An unknown error occurred during processing.';
+          this.successMessage = '';
+          console.error('Task error from backend:', eventData.data);
+        } else if (eventData.event === 'task_cancelled') {
+          this.isLoading = false;
+          this.errorMessage = eventData.data?.message || 'Task was cancelled.';
+          this.successMessage = '';
+          console.warn('Task cancelled from backend:', eventData.data);
+        }
+      },
+      error: (err) => {
+        this.isLoading = false;
+        console.error('Error subscribing to SSE for getFiles:', err);
+        this.errorMessage = err.message || 'Failed to connect or process file stream. Check console for details.';
+        this.successMessage = '';
+        this.original_files = { items: [], root_path: this.rootPath };
+        this.srcPaths = null;
+        this.dstPaths = null;
+      },
+      complete: () => {
+        if (this.isLoading) { 
+            this.isLoading = false;
+        }
       }
-      
-      this.original_files = { items: processedItems, root_path: this.rootPath }; 
-
-      let res = processedItems.map((item: any) => ({ 
-        src_path: `${this.rootPath}/${item.file_path}`, 
-        dst_path: item.dst_path ? `${this.rootPath}/${item.dst_path}` : null
-      }));
-      this.srcPaths = res.map((r: any) => r.src_path);
-      this.dstPaths = res.filter((r:any) => r.dst_path !== null).map((r: any) => r.dst_path);
-      
-      this.isLoading = false;
-    }, (error) => {
-      console.error('Error fetching files:', error);
-      this.errorMessage = 'Error fetching file data. Please check console for details.';
-      this.isLoading = false;
-      this.original_files = { items: [], root_path: this.rootPath }; 
     });
   }
+
 
   updateStructure(): void {
     if (!this.original_files || !this.original_files.items_for_update_structure) { 
@@ -1440,13 +1549,15 @@ export class AppComponent {
         return;
     }
     
-    this.dataService.updateStructure(this.original_files).subscribe(data => {
-      this.successMessage = 'Files re-structured successfully.';
-    },
-      (error) => {
-        console.error(error);
-        this.errorMessage = 'An error occurred while moving data.';
-      });
+    this.dataService.updateStructure(this.original_files).subscribe({ 
+        next: data => {
+            this.successMessage = 'Files re-structured successfully.';
+        },
+        error: error => {
+            console.error(error);
+            this.errorMessage = 'An error occurred while moving data.';
+        }
+    });
   }
 
   onNotify(value: any): void {
@@ -1454,21 +1565,20 @@ export class AppComponent {
     const path = value.path; 
     const root_path = this.original_files.root_path;
     let matchingFilePath = "";
-    // Ensure items exist before trying to find
     const itemsForSearch = this.original_files && this.original_files.items ? this.original_files.items : [];
 
-    if (value.index === 0) { // Current structure tree clicked
+    if (value.index === 0) { 
       const foundItem = itemsForSearch.find((file: any) => root_path + "/" + file.src_path === path);
-      if (foundItem && foundItem.dst_path) { // Check if dst_path exists
+      if (foundItem && foundItem.dst_path) { 
         matchingFilePath = root_path + "/" + foundItem.dst_path;
       }
-    } else { // Optimized structure tree clicked
+    } else { 
       const foundItem = itemsForSearch.find((file: any) => file.dst_path && root_path + "/" + file.dst_path === path);
-      if (foundItem) { // src_path should always exist
+      if (foundItem) { 
         matchingFilePath = root_path + "/" + foundItem.src_path;
       }
     }
-    if(matchingFilePath){ // Only highlight if a match was found
+    if(matchingFilePath){ 
         this.childComponents.toArray()[index].highlightFile(matchingFilePath);
     } else {
         console.warn("No matching file path found for highlighting in the other tree for path:", path);
@@ -1481,7 +1591,6 @@ export class AppComponent {
     localStorage.setItem('theme', this.isDarkTheme ? 'dark' : 'light');
   }
 
-  // Helper method to parse comma-separated file paths input
   private parseFilePaths(): string[] | undefined {
     if (this.searchFilePathsInput && this.searchFilePathsInput.trim() !== '') {
       return this.searchFilePathsInput.split(',').map(fp => fp.trim()).filter(fp => fp !== '');
@@ -1533,15 +1642,18 @@ export class AppComponent {
     this.qaAnswer = null;
 
     const filePaths = this.parseFilePaths();
-
-    this.dataService.answerQuestion(this.searchQueryText, this.searchTopN, filePaths) // Using searchTopN for top_n_chunks for Q&A
-      .subscribe({
+    
+    this.dataService.answerQuestion(
+        this.searchQueryText, 
+        this.searchTopN, 
+        filePaths, 
+        this.selectedLLMProvider, 
+        this.ollamaApiBaseUrl.trim(), 
+        this.selectedOllamaTextModel 
+    ).subscribe({
         next: (response) => {
-          this.qaAnswer = response; // Expects { answer: string, source_chunks: any[] }
+          this.qaAnswer = response; 
           this.isLoadingSearch = false;
-          if (!response.answer || response.answer.trim() === "Could not find relevant documents to answer the question." || response.answer.trim() === "The language model did not provide an answer based on the context."){
-             // this.searchError = response.answer; // Display "no answer" message in results, not as error
-          }
         },
         error: (err) => {
           console.error('Error during question answering:', err);

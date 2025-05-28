@@ -5,6 +5,7 @@ from .run import run, update_file, search_files
 from .embedding_service import embedding_service
 from .vector_store_service import vector_store_service
 from .settings import Model as SettingsModel # Renamed to avoid conflict with 'Model' from Pydantic/FastAPI
+import httpx # Added httpx import
 import os
 import subprocess
 import platform
@@ -41,7 +42,8 @@ async def run_and_report_progress(
     required_exts: list, 
     llm_provider: str, 
     ollama_api_base_url: str | None, 
-    custom_summarization_prompt: str | None
+    custom_summarization_prompt: str | None,
+    ollama_text_model_name: str | None # <-- Add new parameter here
 ):
     """
     Wrapper to call the main 'run' function and pass its progress to the queue.
@@ -58,7 +60,8 @@ async def run_and_report_progress(
             llm_provider=llm_provider,
             ollama_api_base_url=ollama_api_base_url,
             custom_summarization_prompt=custom_summarization_prompt,
-            progress_queue=progress_queue # This new argument will be added to run.py's run function
+            progress_queue=progress_queue, # This new argument will be added to run.py's run function
+            ollama_text_model_name=ollama_text_model_name # <-- Pass it here
         )
         return result
     except asyncio.CancelledError:
@@ -83,8 +86,15 @@ async def get_files_sse(
     required_exts: str, 
     llm_provider: str = Query("openai", description="The LLM provider to use, e.g., 'openai' or 'ollama'"), 
     ollama_api_base_url: str = Query(None, description="Ollama API base URL, e.g., http://localhost:11434/v1"), 
-    custom_summarization_prompt: str = Query(None, description="Custom prompt for document summarization")
+    custom_summarization_prompt: str = Query(None, description="Custom prompt for document summarization"),
+    ollama_text_model_name: str = Query(None, description="Specific Ollama text model name to use (e.g., 'gemma2:latest'). Used if llm_provider is 'ollama' and this is provided.") # <-- Add new query parameter
 ):
+    logger.info(
+        f"GET_FILES called with: root_path='{root_path}', recursive={recursive}, required_exts='{required_exts}', "
+        f"llm_provider='{llm_provider}', ollama_api_base_url='{ollama_api_base_url}', "
+        f"custom_summarization_prompt='{custom_summarization_prompt is not None}', " # Log presence, not value
+        f"ollama_text_model_name='{ollama_text_model_name}'"
+    )
     if not os.path.exists(root_path):
         # EventSourceResponse doesn't handle HTTPExceptions well directly,
         # so we might need a different way if we want to return an error for this initial check.
@@ -109,7 +119,8 @@ async def get_files_sse(
                 parsed_required_exts,
                 llm_provider,
                 ollama_api_base_url,
-                custom_summarization_prompt
+                custom_summarization_prompt,
+                ollama_text_model_name # <-- Pass it here
             )
         )
         active_tasks[task_id] = processing_task
@@ -214,12 +225,39 @@ async def open_file(request: Request):
 
 
 @app.get("/search_files")
-async def get_search_files(root_path: str, recursive: bool, required_exts: str, search_query: str, llm_provider: str = Query("openai", description="The LLM provider to use, e.g., 'openai' or 'ollama'"), ollama_api_base_url: str = Query(None, description="Ollama API base URL, e.g., http://localhost:11434/v1"), custom_summarization_prompt: str = Query(None, description="Custom prompt for document summarization")):
+async def get_search_files(
+    root_path: str, 
+    recursive: bool, 
+    required_exts: str, 
+    search_query: str, 
+    llm_provider: str = Query("openai", description="The LLM provider to use, e.g., 'openai' or 'ollama'"), 
+    ollama_api_base_url: str = Query(None, description="Ollama API base URL, e.g., http://localhost:11434/v1"), 
+    custom_summarization_prompt: str = Query(None, description="Custom prompt for document summarization"), # Assuming it's used by search_files
+    ollama_text_model_name: str = Query(None, description="Specific Ollama text model name to use (e.g., 'gemma2:latest'). Used if llm_provider is 'ollama' and this is provided.") # <-- Add new query parameter
+):
+    logger.info(
+        f"SEARCH_FILES called with: root_path='{root_path}', recursive={recursive}, required_exts='{required_exts}', "
+        f"search_query='{search_query[:50]}...', llm_provider='{llm_provider}', "
+        f"ollama_api_base_url='{ollama_api_base_url}', "
+        f"custom_summarization_prompt='{custom_summarization_prompt is not None}', " # Log presence
+        f"ollama_text_model_name='{ollama_text_model_name}'"
+    )
     if not os.path.exists(root_path):
         return HTTPException(status_code=404, detail=f"Path doesn't exist: {root_path}")
-    required_exts = required_exts.split(';')
+    
+    parsed_required_exts = required_exts.split(';') # Define parsed_required_exts
+
     # Note: Search files is not SSE for now, as per subtask focusing on /get_files
-    files = await search_files(root_path, recursive, required_exts, search_query, llm_provider=llm_provider, ollama_api_base_url=ollama_api_base_url, custom_summarization_prompt=custom_summarization_prompt)
+    files = await search_files(
+        root_path, 
+        recursive, 
+        parsed_required_exts, # Use the parsed list
+        search_query, 
+        llm_provider=llm_provider, 
+        ollama_api_base_url=ollama_api_base_url, 
+        custom_summarization_prompt=custom_summarization_prompt, # Pass it
+        ollama_text_model_name=ollama_text_model_name # <-- Pass it here
+    )
     return files
 
 @app.delete("/cancel_task/{task_id}")
@@ -310,9 +348,19 @@ async def semantic_search_endpoint(
 async def answer_question_endpoint(
     query_text: str = Query(..., description="The user's question."),
     top_n_chunks: int = Query(3, description="Number of relevant chunks to retrieve for context.", ge=1, le=10),
-    file_paths_json: str = Query(None, description="Optional JSON string array of specific file paths to search within.")
+    file_paths_json: str = Query(None, description="Optional JSON string array of specific file paths to search within."),
+    # --- Add these new parameters ---
+    llm_provider: str = Query(None, description="The LLM provider to use (e.g., 'openai', 'ollama'). If None, uses default from .env/settings."),
+    ollama_api_base_url: str = Query(None, description="Ollama API base URL (e.g., http://localhost:11434/v1). Used if llm_provider is 'ollama'."),
+    ollama_text_model_name: str = Query(None, description="Specific Ollama text model name to use (e.g., 'gemma2:latest'). Used if llm_provider is 'ollama' and this is provided.")
+    # --- End of new parameters ---
 ):
-    logger.info(f"Received Q&A request: query_text='{query_text[:50]}...', top_n_chunks={top_n_chunks}, file_paths_json='{file_paths_json}'")
+    logger.info(
+        f"Received Q&A request: query_text='{query_text[:50]}...', "
+        f"top_n_chunks={top_n_chunks}, file_paths_json='{file_paths_json}', "
+        f"llm_provider='{llm_provider}', ollama_api_base_url='{ollama_api_base_url}', "
+        f"ollama_text_model_name='{ollama_text_model_name}'"
+    )
 
     parsed_file_paths = None
     if file_paths_json:
@@ -336,13 +384,21 @@ async def answer_question_endpoint(
     # Instantiate Model from settings for LLM call - assuming default provider for now
     # In a more complex app, llm_provider might come from request or global config.
     try:
-        model_instance = SettingsModel() # Uses defaults from .env or hardcoded in Settings
-        if not model_instance.async_text_clients: # Check if clients were initialized
-             logger.error("LLM text clients are not configured in Model settings for Q&A.")
-             raise HTTPException(status_code=503, detail="LLM service not configured.")
+        # Instantiate Model, passing the provider, Ollama URL, and Ollama model name from the request.
+        # The Model class __init__ (in settings.py) will use these or fall back to .env defaults if they are None.
+        model_instance = SettingsModel(
+            llm_provider=llm_provider, 
+            ollama_api_base_url=ollama_api_base_url, 
+            ollama_text_model_name=ollama_text_model_name  # Pass the new parameter
+        )
+        
+        # Check if text clients were successfully initialized for the chosen provider configuration
+        if not model_instance.async_text_clients or model_instance.text_keys_count == 0:
+             logger.error(f"LLM text clients are not configured in Model settings for Q&A using provider '{model_instance.llm_provider}'. This might be due to missing API keys or incorrect model setup for the provider.")
+             raise HTTPException(status_code=503, detail=f"LLM service not configured for the selected provider: {model_instance.llm_provider}. Check API keys and model names.")
     except Exception as e_model_init:
         logger.error(f"Failed to initialize Model for Q&A: {e_model_init}", exc_info=True)
-        raise HTTPException(status_code=503, detail="LLM service initialization failed.")
+        raise HTTPException(status_code=503, detail=f"LLM service initialization failed: {str(e_model_init)}")
 
 
     if not query_text.strip():
@@ -404,6 +460,57 @@ async def answer_question_endpoint(
         answer = "The language model did not provide an answer based on the context."
 
     return {"answer": answer, "source_chunks": relevant_chunks}
+
+
+@app.get("/ollama/models")
+async def get_ollama_models(
+    ollama_api_base_url: str = Query(..., description="Base URL of the Ollama API (e.g., http://localhost:11434). Do not include /v1 or /api.")
+):
+    if not ollama_api_base_url:
+        # This case should be caught by Query(..., description=...) making it required.
+        # However, an explicit check after stripping can be useful.
+        raise HTTPException(status_code=400, detail="Ollama API base URL is required.")
+
+    # Clean the URL: remove trailing slashes and specific paths like /v1 or /api
+    # to ensure we correctly append /api/tags.
+    cleaned_url = ollama_api_base_url.strip().rstrip('/')
+    if cleaned_url.endswith('/v1'):
+        cleaned_url = cleaned_url[:-3].rstrip('/')
+    elif cleaned_url.endswith('/api'):
+        cleaned_url = cleaned_url[:-4].rstrip('/')
+
+    ollama_list_models_url = f"{cleaned_url}/api/tags"
+    logger.info(f"Attempting to fetch Ollama models from: {ollama_list_models_url}")
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client: # Added timeout
+            response = await client.get(ollama_list_models_url)
+            response.raise_for_status()  # Raise an exception for HTTP errors (4xx or 5xx)
+            
+            models_data = response.json()
+            
+            # Ollama's /api/tags response structure is like: {"models": [{"name": "model:tag", ...}, ...]}
+            if not isinstance(models_data, dict) or "models" not in models_data or not isinstance(models_data["models"], list):
+                logger.error(f"Unexpected response structure from Ollama API at {ollama_list_models_url}. Response: {models_data}")
+                raise HTTPException(status_code=500, detail="Unexpected response structure from Ollama API.")
+
+            model_names = [model.get('name') for model in models_data["models"] if model.get('name')]
+            
+            logger.info(f"Successfully fetched {len(model_names)} models from {ollama_list_models_url}.")
+            return {"models": model_names}
+
+    except httpx.TimeoutException:
+        logger.error(f"Timeout when trying to connect to Ollama at {ollama_list_models_url}.")
+        raise HTTPException(status_code=504, detail=f"Timeout: Could not connect to Ollama at {ollama_api_base_url}. Is it running and accessible?")
+    except httpx.RequestError as e:
+        logger.error(f"Error connecting to Ollama at {ollama_list_models_url}: {e}")
+        raise HTTPException(status_code=503, detail=f"Network error: Could not connect to Ollama at {ollama_api_base_url}. Details: {str(e)}")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Ollama API returned an error {e.response.status_code} from {ollama_list_models_url}: {e.response.text}")
+        raise HTTPException(status_code=e.response.status_code, detail=f"Ollama API error: {e.response.text}")
+    except Exception as e: # Catch-all for other unexpected errors like JSONDecodeError if response is not JSON
+        logger.error(f"An unexpected error occurred while fetching Ollama models from {ollama_list_models_url}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
 
 if __name__ == "__main__":

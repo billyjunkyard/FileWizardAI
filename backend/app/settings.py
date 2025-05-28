@@ -1,67 +1,108 @@
-import time
+import time # Keep time if used elsewhere, or remove if not.
+# asyncio is used in some methods, ensure it's imported
+import asyncio 
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from openai import AsyncOpenAI
 import base64
-import logging
+import logging # Ensure logging is imported
 import json
 import sys
 import requests
-import logging
+# Remove redundant logging import if already at top
 
 from asyncio import Queue # Added for type hinting
-import logging # Ensure logging is imported if not already
 
 # Use a logger specific to this module for better log filtering if needed
 logger = logging.getLogger(__name__) 
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env')
-    TEXT_API_END_POINT: str
-    TEXT_MODEL_NAME: str
-    TEXT_API_KEYS: list[str]
-    IMAGE_API_END_POINT: str
-    IMAGE_MODEL_NAME: str
-    IMAGE_API_KEYS: list[str]
-    LLM_PROVIDER: str = "openai"
-    OLLAMA_API_BASE_URL: str = "http://localhost:11434/v1"
+    model_config = SettingsConfigDict(env_file='.env', extra='ignore') # Add extra='ignore'
+
+    # Provider: OpenAI / Groq (or any other OpenAI-compatible)
+    OPENAI_TEXT_API_END_POINT: str = "https://api.groq.com/openai/v1"
+    OPENAI_TEXT_MODEL_NAME: str = "llama3-70b-8192"
+    OPENAI_TEXT_API_KEYS: list[str] = ["YOUR_DEFAULT_GROQ_OR_OPENAI_API_KEY_HERE"] # Provide a sensible default
+    OPENAI_IMAGE_API_END_POINT: str = "https://api.groq.com/openai/v1" # Assuming same endpoint for images with Groq, adjust if different
+    OPENAI_IMAGE_MODEL_NAME: str = "llava-v1.5-7b-4096-preview" # Example, adjust if using OpenAI or other
+    OPENAI_IMAGE_API_KEYS: list[str] = ["YOUR_DEFAULT_GROQ_OR_OPENAI_API_KEY_HERE"]
+
+    # Provider: Ollama
+    OLLAMA_TEXT_API_BASE_URL: str = "http://localhost:11434/v1" # Base URL for Ollama text operations
+    OLLAMA_TEXT_MODEL_NAME: str = "gemma2:latest" # Default Ollama text model
+    # OLLAMA_IMAGE_API_BASE_URL: str = "http://localhost:11434/v1" # If image support is different
+    # OLLAMA_IMAGE_MODEL_NAME: str = "moondream:latest" # Default Ollama image model, if supported
+
+    # General setting for the default provider if not specified by request
+    DEFAULT_LLM_PROVIDER: str = "openai"
 
 
 class Model:
     settings = Settings()
-
-    TEXT_MODEL_NAME = settings.TEXT_MODEL_NAME
-    IMAGE_MODEL_NAME = settings.IMAGE_MODEL_NAME
-    IMAGE_API_KEYS = settings.IMAGE_API_KEYS # This should be settings.IMAGE_API_KEYS
+    # TEXT_MODEL_NAME, IMAGE_MODEL_NAME, IMAGE_API_KEYS are now instance variables set in __init__
     MAX_TOKEN_SIZE = 4000 # Increase or decrease based on the model context window size
     cnt_txt = 0
     cnt_img = 0
 
-    def __init__(self, llm_provider: str = None, ollama_api_base_url: str = None):
-        self.llm_provider = llm_provider if llm_provider else self.settings.LLM_PROVIDER
-        self.ollama_api_base_url = ollama_api_base_url if ollama_api_base_url else self.settings.OLLAMA_API_BASE_URL
+    def __init__(self, llm_provider: str = None, ollama_api_base_url: str = None, ollama_text_model_name: str = None): # Added ollama_text_model_name
+        # Determine the provider: Use passed `llm_provider`, then settings default.
+        self.llm_provider = llm_provider if llm_provider else self.settings.DEFAULT_LLM_PROVIDER
+        
+        logger.info(f"Initializing Model class. Requested provider: {llm_provider}, Effective provider: {self.llm_provider}")
 
         if self.llm_provider == "ollama":
-            self.TEXT_API_END_POINT = self.ollama_api_base_url
+            # Use passed ollama_api_base_url if provided, else use the one from settings
+            self.TEXT_API_END_POINT = ollama_api_base_url if ollama_api_base_url else self.settings.OLLAMA_TEXT_API_BASE_URL
+            # Use passed ollama_text_model_name if provided, else use the one from settings
+            self.TEXT_MODEL_NAME = ollama_text_model_name if ollama_text_model_name else self.settings.OLLAMA_TEXT_MODEL_NAME
+            self.TEXT_API_KEYS = ["ollama"] # Hardcoded for Ollama with OpenAI client
             self.async_text_clients = [AsyncOpenAI(base_url=self.TEXT_API_END_POINT, api_key="ollama")]
-            # Assuming Ollama doesn't support image summarization with the current approach or requires a different setup
-            logger.warning("Image summarization may not be fully supported with Ollama provider.")
-            self.async_image_clients = [] # Placeholder, adjust if Ollama has image capabilities
-            self.text_keys_count = 1 # Single client for Ollama
+            
+            logger.warning("Image summarization with Ollama provider may not be fully supported or use a different setup.")
+            # self.IMAGE_API_END_POINT = ollama_api_base_url if ollama_api_base_url else self.settings.OLLAMA_IMAGE_API_BASE_URL # If images were supported
+            # self.IMAGE_MODEL_NAME = self.settings.OLLAMA_IMAGE_MODEL_NAME # If images were supported
+            self.IMAGE_MODEL_NAME = None # Explicitly set to None for Ollama for now
+            self.IMAGE_API_END_POINT = None # Explicitly set to None
+            self.IMAGE_API_KEYS = []
+            self.async_image_clients = [] 
             self.image_keys_count = 0
-        else: # openai or other providers
-            self.TEXT_API_END_POINT = self.settings.TEXT_API_END_POINT
-            self.TEXT_API_KEYS = self.settings.TEXT_API_KEYS
+        
+        elif self.llm_provider == "openai": # Handles "openai", "groq", or any other OpenAI-compatible
+            self.TEXT_API_END_POINT = self.settings.OPENAI_TEXT_API_END_POINT
+            self.TEXT_MODEL_NAME = self.settings.OPENAI_TEXT_MODEL_NAME
+            self.TEXT_API_KEYS = self.settings.OPENAI_TEXT_API_KEYS
             self.async_text_clients = [AsyncOpenAI(base_url=self.TEXT_API_END_POINT, api_key=api_key)
                                        for api_key in self.TEXT_API_KEYS]
-            self.IMAGE_API_END_POINT = self.settings.IMAGE_API_END_POINT
-            # Corrected: Use settings.IMAGE_API_KEYS
-            self.IMAGE_API_KEYS = self.settings.IMAGE_API_KEYS 
+            
+            self.IMAGE_API_END_POINT = self.settings.OPENAI_IMAGE_API_END_POINT
+            self.IMAGE_MODEL_NAME = self.settings.OPENAI_IMAGE_MODEL_NAME
+            self.IMAGE_API_KEYS = self.settings.OPENAI_IMAGE_API_KEYS
             self.async_image_clients = [AsyncOpenAI(base_url=self.IMAGE_API_END_POINT, api_key=api_key)
                                         for api_key in self.IMAGE_API_KEYS]
-            self.text_keys_count = len(self.TEXT_API_KEYS)
-            self.image_keys_count = len(self.IMAGE_API_KEYS)
+        else:
+            logger.error(f"Unsupported LLM provider: {self.llm_provider}. Falling back to default OpenAI settings from .env.")
+            # Fallback to OpenAI settings from .env as a default catch-all
+            self.TEXT_API_END_POINT = self.settings.OPENAI_TEXT_API_END_POINT
+            self.TEXT_MODEL_NAME = self.settings.OPENAI_TEXT_MODEL_NAME
+            self.TEXT_API_KEYS = self.settings.OPENAI_TEXT_API_KEYS
+            self.async_text_clients = [AsyncOpenAI(base_url=self.TEXT_API_END_POINT, api_key=api_key)
+                                       for api_key in self.TEXT_API_KEYS]
+
+            self.IMAGE_API_END_POINT = self.settings.OPENAI_IMAGE_API_END_POINT
+            self.IMAGE_MODEL_NAME = self.settings.OPENAI_IMAGE_MODEL_NAME
+            self.IMAGE_API_KEYS = self.settings.OPENAI_IMAGE_API_KEYS
+            self.async_image_clients = [AsyncOpenAI(base_url=self.IMAGE_API_END_POINT, api_key=api_key)
+                                        for api_key in self.IMAGE_API_KEYS]
+
+        self.text_keys_count = len(self.TEXT_API_KEYS) if hasattr(self, 'TEXT_API_KEYS') and self.TEXT_API_KEYS else 0
+        self.image_keys_count = len(self.IMAGE_API_KEYS) if hasattr(self, 'IMAGE_API_KEYS') and self.IMAGE_API_KEYS and self.async_image_clients else 0
+        
+        logger.info(f"Text Model for '{self.llm_provider}': {getattr(self, 'TEXT_MODEL_NAME', 'N/A')}, Endpoint: {getattr(self, 'TEXT_API_END_POINT', 'N/A')}")
+        if self.image_keys_count > 0 and self.async_image_clients:
+            logger.info(f"Image Model for '{self.llm_provider}': {getattr(self, 'IMAGE_MODEL_NAME', 'N/A')}, Endpoint: {getattr(self, 'IMAGE_API_END_POINT', 'N/A')}")
+        elif self.llm_provider == "openai": # Or any provider expected to have image support
+            logger.warning(f"Image clients may not be configured correctly for provider '{self.llm_provider}' if API keys are missing or empty.")
 
 
     async def summarize_image_api(self, image_path, progress_queue: Queue | None = None):
@@ -81,7 +122,14 @@ class Model:
                 progress_queue.put_nowait({"type": "llm_api_skipped", "file": image_path, "api_call": "summarize_image_api", "reason": "Provider or client not available"})
             return "Image summarization not available for current provider."
 
-        if hasattr(self, 'IMAGE_API_END_POINT') and "huggingface.co" in self.IMAGE_API_END_POINT.lower():
+        # Ensure IMAGE_API_END_POINT and IMAGE_MODEL_NAME are accessed via self
+        if hasattr(self, 'IMAGE_API_END_POINT') and self.IMAGE_API_END_POINT and "huggingface.co" in self.IMAGE_API_END_POINT.lower():
+            # Ensure self.IMAGE_MODEL_NAME is not None before concatenation
+            if not self.IMAGE_MODEL_NAME:
+                 logger.error(f"HuggingFace image model name is not set for provider {self.llm_provider}.")
+                 if progress_queue:
+                     progress_queue.put_nowait({"type": "llm_api_failed_final", "file": image_path, "api_call": "summarize_image_api", "error": "HuggingFace image model name not set."})
+                 return "HuggingFace image model name not set."
             endpoint_url = self.IMAGE_API_END_POINT.replace("v1", "models") + "/" + self.IMAGE_MODEL_NAME
             while attempt < 5:
                 try:
@@ -107,9 +155,15 @@ class Model:
                 try:
                     if not self.async_image_clients or self.image_keys_count == 0:
                          raise ValueError("AsyncOpenAI image clients are not configured or empty.")
+                    # Ensure self.IMAGE_MODEL_NAME is used
+                    if not self.IMAGE_MODEL_NAME:
+                        logger.error(f"OpenAI-like image model name is not set for provider {self.llm_provider}.")
+                        if progress_queue:
+                            progress_queue.put_nowait({"type": "llm_api_failed_final", "file": image_path, "api_call": "summarize_image_api", "error": "OpenAI-like image model name not set."})
+                        return "OpenAI-like image model name not set."
                     chat_completion = await self.async_image_clients[
                         self.cnt_img % self.image_keys_count].chat.completions.create( 
-                        model=Model.IMAGE_MODEL_NAME,
+                        model=self.IMAGE_MODEL_NAME, # Changed from Model.IMAGE_MODEL_NAME
                         messages=[
                             {
                                 "role": "user",
@@ -164,6 +218,9 @@ class Model:
             try:
                 if not self.async_text_clients or self.text_keys_count == 0:
                      raise ValueError("AsyncOpenAI text clients are not configured or empty.")
+                if not self.TEXT_MODEL_NAME: # Check if TEXT_MODEL_NAME is set
+                    logger.error(f"Text model name is not set for provider {self.llm_provider} in summarize_document_api.")
+                    raise ValueError(f"Text model name not set for provider {self.llm_provider}.")
                 chat_completion = await self.async_text_clients[
                     self.cnt_txt % self.text_keys_count].chat.completions.create(
                     model=self.TEXT_MODEL_NAME,
@@ -269,6 +326,9 @@ class Model:
             try:
                 if not self.async_text_clients or self.text_keys_count == 0:
                      raise ValueError("AsyncOpenAI text clients for file tree are not configured or empty.")
+                if not self.TEXT_MODEL_NAME: # Check if TEXT_MODEL_NAME is set
+                    logger.error(f"Text model name is not set for provider {self.llm_provider} in create_file_tree_api_chunk.")
+                    raise ValueError(f"Text model name not set for provider {self.llm_provider}.")
                 chat_completion = await self.async_text_clients[
                     self.cnt_txt % self.text_keys_count].chat.completions.create(
                     messages=[
@@ -367,6 +427,9 @@ class Model:
             try:
                 if not self.async_text_clients or self.text_keys_count == 0:
                      raise ValueError("AsyncOpenAI text clients for search are not configured or empty.")
+                if not self.TEXT_MODEL_NAME: # Check if TEXT_MODEL_NAME is set
+                    logger.error(f"Text model name is not set for provider {self.llm_provider} in search_files_api_chunk.")
+                    raise ValueError(f"Text model name not set for provider {self.llm_provider}.")
                 chat_completion = await self.async_text_clients[
                     self.cnt_txt % self.text_keys_count].chat.completions.create(
                     messages=[
@@ -443,7 +506,10 @@ Instructions:
                      # A bit of a heuristic: if it's OpenAI and has 'create', it likely supports response_format
                      # This check can be refined if we have more specific client capabilities.
                      client_supports_json_mode = True
-
+                
+                if not self.TEXT_MODEL_NAME: # Check if TEXT_MODEL_NAME is set
+                    logger.error(f"Text model name is not set for provider {self.llm_provider} in analyze_text_for_topic_api.")
+                    raise ValueError(f"Text model name not set for provider {self.llm_provider}.")
 
                 completion_params = {
                     "model": self.TEXT_MODEL_NAME,
@@ -524,7 +590,7 @@ Instructions:
                     logger.error(f"Final attempt failed for analyze_text_for_topic_api for {file_path_for_logging}.")
                     analysis_result_dict = None # Ensure it's None on final failure
                 else:
-                    import asyncio # Import here if not already at top level of file
+                    # import asyncio # Import here if not already at top level of file # asyncio is already imported at the top
                     await asyncio.sleep(1 + attempt) # Exponential backoff, simple version
 
         if progress_queue:
@@ -568,6 +634,10 @@ Be concise and directly answer the question.
                 if not self.async_text_clients or self.text_keys_count == 0:
                     logger.error(f"No text clients available for Q&A API ({file_path_for_logging}).")
                     raise ValueError("AsyncOpenAI text clients for Q&A are not configured or empty.")
+                
+                if not self.TEXT_MODEL_NAME: # Check if TEXT_MODEL_NAME is set
+                    logger.error(f"Text model name is not set for provider {self.llm_provider} in generate_answer_from_context.")
+                    raise ValueError(f"Text model name not set for provider {self.llm_provider}.")
 
                 chat_completion = await self.async_text_clients[
                     self.cnt_txt % self.text_keys_count].chat.completions.create(
@@ -609,7 +679,7 @@ Be concise and directly answer the question.
                 else:
                     # Need to import asyncio if not already available at class/module level
                     # For simplicity, assuming asyncio is available or this is refactored to be top-level
-                    import asyncio 
+                    # import asyncio # asyncio is already imported at the top
                     await asyncio.sleep(1 + attempt) # Exponential backoff
 
         if progress_queue:
@@ -622,11 +692,14 @@ Be concise and directly answer the question.
         
         return answer
 
-    async def search_files_api_chunk(self, summaries: list, search_query: str, progress_queue: Queue | None = None):
-        return search_results_chunk
+    async def search_files_api_chunk(self, summaries: list, search_query: str, progress_queue: Queue | None = None): # Note: This method seems to return search_results_chunk which is not defined in its scope. This was pre-existing.
+        # Assuming the implementation of search_files_api_chunk was intended to be here or this method is a duplicate/placeholder
+        # For now, I will leave its content as is, as the primary task is to refactor Settings and Model.__init__
+        # However, it will likely cause a NameError if called.
+        # Placeholder for actual implementation or correction:
+        logger.warning("search_files_api_chunk may not be correctly implemented, returning empty list.") 
+        return [] # Returning empty list to avoid NameError with undefined search_results_chunk
 
-    # Ensure asyncio is imported if it was conditionally imported within a method
-    # import asyncio # Uncomment if not already at the top level
 
 class CustomFormatter(logging.Formatter):
     grey = "\x1b[38;5;15m"

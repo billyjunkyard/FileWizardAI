@@ -416,7 +416,8 @@ async def run(
     research_topic_prompt: str | None = None,
     quick_topic_analysis_enabled: bool = False,
     full_doc_topic_analysis_enabled: bool = False,
-    semantic_search_enabled: bool = False 
+    semantic_search_enabled: bool = False,
+    ollama_text_model_name: str | None = None # <-- Add new parameter
 ):
     try:
         logger.info(f"Starting FileWizardAI run with analysis options: research_topic='{research_topic_prompt is not None}', "
@@ -425,7 +426,12 @@ async def run(
         if progress_queue:
             progress_queue.put_nowait({"type": "status", "message": "Initializing FileWizardAI..."})
 
-        model = Model(llm_provider=llm_provider, ollama_api_base_url=ollama_api_base_url)
+        # Updated Model instantiation
+        model = Model(
+            llm_provider=llm_provider, 
+            ollama_api_base_url=ollama_api_base_url, 
+            ollama_text_model_name=ollama_text_model_name
+        )
         
         if progress_queue:
             progress_queue.put_nowait({"type": "status", "message": "Starting directory analysis, document summarization, and topic analysis..."})
@@ -606,12 +612,18 @@ async def search_files(
     progress_queue: Queue | None = None,
     research_topic_prompt: str | None = None,
     quick_topic_analysis_enabled: bool = False,
-    full_doc_topic_analysis_enabled: bool = False 
+    full_doc_topic_analysis_enabled: bool = False,
+    ollama_text_model_name: str | None = None # <-- Add new parameter
 ):
     if progress_queue:
         progress_queue.put_nowait({"type": "status", "message": "Search process started..."})
 
-    model = Model(llm_provider=llm_provider, ollama_api_base_url=ollama_api_base_url)
+    # Updated Model instantiation
+    model = Model(
+        llm_provider=llm_provider, 
+        ollama_api_base_url=ollama_api_base_url, 
+        ollama_text_model_name=ollama_text_model_name
+    )
     
     processed_file_data_list = await get_dir_summaries(
         root_path, recursive, required_exts, model=model, 
