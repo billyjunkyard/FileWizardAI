@@ -52,16 +52,26 @@ class Model:
         logger.info(f"Initializing Model class. Requested provider: {llm_provider}, Effective provider: {self.llm_provider}")
 
         if self.llm_provider == "ollama":
-            # Use passed ollama_api_base_url if provided, else use the one from settings
-            self.TEXT_API_END_POINT = ollama_api_base_url if ollama_api_base_url else self.settings.OLLAMA_TEXT_API_BASE_URL
+            # Determine the base URL (from argument or settings)
+            raw_ollama_base_url = ollama_api_base_url if ollama_api_base_url else self.settings.OLLAMA_TEXT_API_BASE_URL
+            
+            # Ensure the URL is cleaned and has /v1 suffix
+            cleaned_url = raw_ollama_base_url.strip().rstrip('/')
+            if not cleaned_url.endswith('/v1'):
+                final_ollama_endpoint = f"{cleaned_url}/v1"
+            else:
+                final_ollama_endpoint = cleaned_url
+            
+            self.TEXT_API_END_POINT = final_ollama_endpoint
             # Use passed ollama_text_model_name if provided, else use the one from settings
             self.TEXT_MODEL_NAME = ollama_text_model_name if ollama_text_model_name else self.settings.OLLAMA_TEXT_MODEL_NAME
             self.TEXT_API_KEYS = ["ollama"] # Hardcoded for Ollama with OpenAI client
+            
+            logger.info(f"Configuring Ollama client. Endpoint: {self.TEXT_API_END_POINT}, Model: {self.TEXT_MODEL_NAME}") # Updated log
+            
             self.async_text_clients = [AsyncOpenAI(base_url=self.TEXT_API_END_POINT, api_key="ollama")]
             
             logger.warning("Image summarization with Ollama provider may not be fully supported or use a different setup.")
-            # self.IMAGE_API_END_POINT = ollama_api_base_url if ollama_api_base_url else self.settings.OLLAMA_IMAGE_API_BASE_URL # If images were supported
-            # self.IMAGE_MODEL_NAME = self.settings.OLLAMA_IMAGE_MODEL_NAME # If images were supported
             self.IMAGE_MODEL_NAME = None # Explicitly set to None for Ollama for now
             self.IMAGE_API_END_POINT = None # Explicitly set to None
             self.IMAGE_API_KEYS = []
